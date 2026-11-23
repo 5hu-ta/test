@@ -1,3 +1,6 @@
+v13を丸ごと出す。Auto Ken/Buso/V3/V4 を常時オン化し、UIから該当セクションを削除。
+
+```lua
 --[[
     Blox Fruits — Extract v13
     Changes from v12:
