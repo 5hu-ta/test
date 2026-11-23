@@ -1,16 +1,17 @@
 --[[
-    Blox Fruits — Extract v10
-    Changes:
-      - FastMode / NoFog / FPS Boost are always-on (no toggles)
-      - Status panel (top-right corner) shows working state
-      - FPS Boost reapplied every 60s to survive map changes
+    Blox Fruits — Extract v11
+    Changes from v10:
+      - FastMode removed entirely
+      - Auto-join Pirates on load (only if no team selected)
+      - Manual Join Pirates / Join Marines buttons added
+      - Status panel now only shows NoFog / FPS Boost
 ]]
 
 -- ============================================
 -- SINGLE INSTANCE GUARD
 -- ============================================
 if getgenv().ExtractV6_Lock then
-    warn("[Extract v10] Already running. Click 'Unload' in the existing UI first.")
+    warn("[Extract v11] Already running. Click 'Unload' in the existing UI first.")
     return
 end
 getgenv().ExtractV6_Lock = true
@@ -33,8 +34,6 @@ local State = {
     AutoBuso = false,
     AutoV3 = false,
     AutoV4 = false,
-    NoFog = true,
-    AutoFastMode = true,
     Target = nil,
     TargetIndex = 1,
     TargetList = {},
@@ -52,7 +51,6 @@ local State = {
 
 local Runtime = {
     NoFogApplied = false,
-    FastModeActive = false,
     FPSApplied = false,
 }
 
@@ -63,56 +61,38 @@ local function getChar() return LP.Character end
 local function getHRP() return getChar() and getChar():FindFirstChild("HumanoidRootPart") end
 local function getHum() return getChar() and getChar():FindFirstChildOfClass("Humanoid") end
 
--- ============================================
--- PERFORMANCE MODULE (FastMode)
--- ============================================
-local Performance = nil
-do
-    local function tryRequire(path)
-        local node = ReplicatedStorage
-        for _, seg in ipairs(path) do
-            node = node and node:FindFirstChild(seg)
-            if not node then return nil end
-        end
-        local ok, res = pcall(require, node)
-        return ok and res or nil
-    end
-    local candidates = {
-        {"Modules", "Performance"},
-        {"Performance"},
-        {"Modules", "Net", "Performance"},
-    }
-    for _, path in ipairs(candidates) do
-        local p = tryRequire(path)
-        if p and (p.SetFastMode or p.FastMode ~= nil) then
-            Performance = p
-            break
-        end
-    end
-    if not Performance then
-        warn("[Extract v10] Performance module not found. FastMode disabled.")
-    end
+local function getRemotes()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then return nil, nil end
+    return remotes:FindFirstChild("CommF_"), remotes:FindFirstChild("CommE")
 end
 
-local function setFastMode(on)
-    if not Performance then return end
-    if Performance.SetFastMode then
-        pcall(function() Performance.SetFastMode(on) end)
-    end
+-- ============================================
+-- AUTO JOIN PIRATES (only if no team)
+-- ============================================
+local function tryJoinPirates()
+    local commF = getRemotes()
+    if not commF then return false, "no remote" end
+    if LP.Team then return false, "already in team" end
+    pcall(function() commF:InvokeServer("SetTeam", "Pirates") end)
+    task.wait(0.3)
+    return LP.Team ~= nil, "invoked"
 end
 
--- FastMode maintenance: apply at load, reapply every 3s
 task.spawn(function()
-    if not Performance then return end
-    setFastMode(true)
-    Runtime.FastModeActive = true
-    while State.Loaded do
-        task.wait(3)
-        if Performance.FastMode ~= true then
-            setFastMode(true)
+    -- give the game a moment to spawn before team selection
+    task.wait(2)
+    for _ = 1, 15 do
+        if not State.Loaded then return end
+        if LP.Team then return end
+        local ok, reason = tryJoinPirates()
+        if ok then
+            print("[Extract v11] Auto-joined Pirates.")
+            return
         end
-        Runtime.FastModeActive = (Performance.FastMode == true)
+        task.wait(2)
     end
+    warn("[Extract v11] Auto-join Pirates timed out. Use the UI button.")
 end)
 
 -- ============================================
@@ -202,7 +182,6 @@ local function forceFPSBoost()
     Runtime.FPSApplied = true
 end
 
--- FPS Boost maintenance
 task.spawn(function()
     task.wait(0.5)
     while State.Loaded do
@@ -212,17 +191,11 @@ task.spawn(function()
 end)
 
 -- ============================================
--- HAKI REMOTES
+-- HAKI REMOTES LOOP
 -- ============================================
-local function getRemotes()
-    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    if not remotes then return nil, nil end
-    return remotes:FindFirstChild("CommF_"), remotes:FindFirstChild("CommE")
-end
-
 task.spawn(function()
     while State.Loaded do
-        if State.NoFog then pcall(applyNoFog) end
+        pcall(applyNoFog)
         local char = getChar()
         if char then
             local commF, commE = getRemotes()
@@ -581,16 +554,16 @@ local heartbeatConn = RunService.Heartbeat:Connect(function()
 end)
 
 -- ============================================
--- UI (main control panel)
+-- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV10"
+ui.Name = "ExtractV11"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 430)
-frame.Position = UDim2.new(0, 20, 0.5, -215)
+frame.Size = UDim2.new(0, 240, 0, 540)
+frame.Position = UDim2.new(0, 20, 0.5, -270)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -602,7 +575,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v10"
+title.Text = "Extract v11"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -750,10 +723,68 @@ makeToggle(
     function(v) State.AutoV4 = v end
 )
 
+-- Team section
+local teamLabel = Instance.new("TextLabel")
+teamLabel.Size = UDim2.new(1, -20, 0, 20)
+teamLabel.Position = UDim2.new(0, 10, 0, 389)
+teamLabel.BackgroundTransparency = 1
+teamLabel.Text = "— Team —"
+teamLabel.TextColor3 = Color3.fromRGB(140, 140, 160)
+teamLabel.Font = Enum.Font.GothamBold
+teamLabel.TextSize = 11
+teamLabel.TextXAlignment = Enum.TextXAlignment.Left
+teamLabel.Parent = frame
+
+local piratesBtn = Instance.new("TextButton")
+piratesBtn.Size = UDim2.new(0.5, -15, 0, 28)
+piratesBtn.Position = UDim2.new(0, 10, 0, 409)
+piratesBtn.BackgroundColor3 = Color3.fromRGB(120, 60, 60)
+piratesBtn.BorderSizePixel = 0
+piratesBtn.Text = "Join Pirates"
+piratesBtn.TextColor3 = Color3.new(1, 1, 1)
+piratesBtn.Font = Enum.Font.GothamBold
+piratesBtn.TextSize = 11
+piratesBtn.Parent = frame
+Instance.new("UICorner", piratesBtn).CornerRadius = UDim.new(0, 5)
+piratesBtn.MouseButton1Click:Connect(function()
+    local commF = getRemotes()
+    if not commF then
+        piratesBtn.Text = "No remote"
+        task.wait(1.2); piratesBtn.Text = "Join Pirates"
+        return
+    end
+    pcall(function() commF:InvokeServer("SetTeam", "Pirates") end)
+    piratesBtn.Text = "Joined!"
+    task.wait(1.2); piratesBtn.Text = "Join Pirates"
+end)
+
+local marinesBtn = Instance.new("TextButton")
+marinesBtn.Size = UDim2.new(0.5, -15, 0, 28)
+marinesBtn.Position = UDim2.new(0.5, 5, 0, 409)
+marinesBtn.BackgroundColor3 = Color3.fromRGB(60, 90, 160)
+marinesBtn.BorderSizePixel = 0
+marinesBtn.Text = "Join Marines"
+marinesBtn.TextColor3 = Color3.new(1, 1, 1)
+marinesBtn.Font = Enum.Font.GothamBold
+marinesBtn.TextSize = 11
+marinesBtn.Parent = frame
+Instance.new("UICorner", marinesBtn).CornerRadius = UDim.new(0, 5)
+marinesBtn.MouseButton1Click:Connect(function()
+    local commF = getRemotes()
+    if not commF then
+        marinesBtn.Text = "No remote"
+        task.wait(1.2); marinesBtn.Text = "Join Marines"
+        return
+    end
+    pcall(function() commF:InvokeServer("SetTeam", "Marines") end)
+    marinesBtn.Text = "Joined!"
+    task.wait(1.2); marinesBtn.Text = "Join Marines"
+end)
+
 -- Unload
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 395)
+unloadBtn.Position = UDim2.new(0, 10, 0, 449)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 unloadBtn.BorderSizePixel = 0
 unloadBtn.Text = "Unload"
@@ -764,7 +795,7 @@ unloadBtn.Parent = frame
 Instance.new("UICorner", unloadBtn).CornerRadius = UDim.new(0, 5)
 
 -- ============================================
--- STATUS PANEL (top-right corner)
+-- STATUS PANEL (top-right)
 -- ============================================
 local statusGui = Instance.new("ScreenGui")
 statusGui.Name = "ExtractStatus"
@@ -772,7 +803,7 @@ statusGui.ResetOnSpawn = false
 statusGui.Parent = LP:WaitForChild("PlayerGui")
 
 local statusFrame = Instance.new("Frame")
-statusFrame.Size = UDim2.new(0, 170, 0, 76)
+statusFrame.Size = UDim2.new(0, 170, 0, 60)
 statusFrame.Position = UDim2.new(1, -180, 0, 10)
 statusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 statusFrame.BackgroundTransparency = 0.2
@@ -805,11 +836,8 @@ local function makeStatusLine(y)
     return lbl
 end
 
-local nofogLine     = makeStatusLine(24)
-local fastmodeLine  = makeStatusLine(40)
-local fpsLine       = makeStatusLine(56)
-
-local unloadBtn = unloadBtn  -- alias for closure
+local nofogLine = makeStatusLine(24)
+local fpsLine   = makeStatusLine(42)
 
 unloadBtn.MouseButton1Click:Connect(function()
     State.TPChase = false
@@ -825,7 +853,7 @@ unloadBtn.MouseButton1Click:Connect(function()
     if ui then ui:Destroy() end
     if statusGui then statusGui:Destroy() end
     getgenv().ExtractV6_Lock = false
-    print("[Extract v10] Unloaded.")
+    print("[Extract v11] Unloaded.")
 end)
 
 -- Status updater
@@ -840,17 +868,6 @@ task.spawn(function()
         else
             nofogLine.Text = "… NoFog pending"
             nofogLine.TextColor3 = Color3.fromRGB(220, 180, 80)
-        end
-
-        if Performance and Performance.FastMode == true then
-            fastmodeLine.Text = "✓ FastMode working"
-            fastmodeLine.TextColor3 = Color3.fromRGB(100, 220, 140)
-        elseif Performance then
-            fastmodeLine.Text = "… FastMode pending"
-            fastmodeLine.TextColor3 = Color3.fromRGB(220, 180, 80)
-        else
-            fastmodeLine.Text = "✗ FastMode N/A"
-            fastmodeLine.TextColor3 = Color3.fromRGB(220, 100, 100)
         end
 
         if Runtime.FPSApplied then
@@ -882,4 +899,4 @@ task.spawn(function()
     end
 end)
 
-print("[Extract v10] Loaded. FastMode/NoFog/FPSBoost always-on.")
+print("[Extract v11] Loaded. FastMode removed. Auto-join Pirates on load.")
