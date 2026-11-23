@@ -1,18 +1,17 @@
 --[[
-    Blox Fruits — Extract v6
-    Changes from v5:
-      - Orbit center smoothed with lerp (fixes position desync)
-      - Per-frame delta cap (prevents huge jumps)
-      - Rubberband detection: auto-throttles orbit speed on server reset
-      - Single-instance lock via getgenv()
-      - Unload button to release lock
+    Blox Fruits — Extract v7
+    New:
+      - Auto Ken (Observation Haki)   via CommE:FireServer("Ken", true)
+      - Auto Buso (Armament Haki)     via CommF_ InvokeServer("BuyHaki"/"Buso")
+      - Auto V3 (Agility)             via CommE:FireServer("ActivateAbility")
+      - Auto V4 (Race transform)      via Backpack.Awakening.RemoteFunction
 ]]
 
 -- ============================================
 -- SINGLE INSTANCE GUARD
 -- ============================================
 if getgenv().ExtractV6_Lock then
-    warn("[Extract v6] Already running. Click 'Unload' in the existing UI first.")
+    warn("[Extract v7] Already running. Click 'Unload' in the existing UI first.")
     return
 end
 getgenv().ExtractV6_Lock = true
@@ -28,15 +27,20 @@ local LP = Players.LocalPlayer
 -- STATE
 -- ============================================
 local State = {
+    Loaded = true,
     TPChase = false,
     AutoM1 = false,
+    AutoKen = false,
+    AutoBuso = false,
+    AutoV3 = false,
+    AutoV4 = false,
     Target = nil,
     TargetIndex = 1,
     TargetList = {},
     ChaseSpeed = 250,
     ChunkSize = 200,
     ChunkWait = 0.02,
-    OrbitRadius = 40,
+    OrbitRadius = 37.5,
     OrbitHeight = 16,
     OrbitSpeed = 10,
     AttackRange = 150,
@@ -73,6 +77,58 @@ local function removeLava()
 end
 
 -- ============================================
+-- HAKI REMOTES
+-- ============================================
+local function getRemotes()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then return nil, nil end
+    return remotes:FindFirstChild("CommF_"), remotes:FindFirstChild("CommE")
+end
+
+-- periodic loop for Ken / Buso / V3 / V4
+task.spawn(function()
+    while State.Loaded do
+        local char = getChar()
+        if char then
+            local commF, commE = getRemotes()
+
+            if State.AutoKen and commE then
+                pcall(function() commE:FireServer("Ken", true) end)
+            end
+
+            if State.AutoBuso and commF then
+                pcall(function()
+                    if not char:HasTag("Buso") then
+                        commF:InvokeServer("BuyHaki", "Buso")
+                    elseif not char:FindFirstChild("HasBuso") then
+                        commF:InvokeServer("Buso")
+                    end
+                end)
+            end
+
+            if State.AutoV3 and commE then
+                pcall(function() commE:FireServer("ActivateAbility") end)
+            end
+
+            if State.AutoV4 then
+                pcall(function()
+                    local backpack = LP:FindFirstChild("Backpack")
+                    local awakening = backpack and backpack:FindFirstChild("Awakening")
+                    local energy = char:FindFirstChild("RaceEnergy")
+                    local transformed = char:FindFirstChild("RaceTransformed")
+                    if awakening and energy and transformed then
+                        if energy.Value >= 1 and not transformed.Value then
+                            awakening.RemoteFunction:InvokeServer({true})
+                        end
+                    end
+                end)
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- ============================================
 -- TP CHASE — anti-rubberband orbit
 -- ============================================
 local tpRunning = false
@@ -88,7 +144,7 @@ local function chaseLoop(plr)
     local rubberbandHits = 0
     local effectiveOrbitSpeed = State.OrbitSpeed
 
-    while State.TPChase and State.Target == plr do
+    while State.TPChase and State.Target == plr and State.Loaded do
         local hrp = getHRP()
         local tChar = plr.Character
         local tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
@@ -111,12 +167,10 @@ local function chaseLoop(plr)
         if orbitActive then
             local dt = task.wait()
 
-            -- hard snap if enemy teleported very far (portal, dash, X)
             if smoothedCenter and (smoothedCenter - targetCenter).Magnitude > 60 then
                 smoothedCenter = targetCenter
             end
 
-            -- lerp center to reduce jitter from physics noise
             if not smoothedCenter then smoothedCenter = targetCenter end
             smoothedCenter = smoothedCenter:Lerp(targetCenter, math.min(1, 15 * dt))
 
@@ -129,7 +183,6 @@ local function chaseLoop(plr)
             )
             local newPos = smoothedCenter + offset
 
-            -- per-frame delta cap
             local moveDelta = (newPos - hrp.Position).Magnitude
             if moveDelta > 8 then
                 newPos = hrp.Position + (newPos - hrp.Position).Unit * 8
@@ -137,7 +190,6 @@ local function chaseLoop(plr)
 
             hrp.CFrame = CFrame.lookAt(newPos, Vector3.new(tPos.X, newPos.Y, tPos.Z))
 
-            -- rubberband detection
             if lastSetPos then
                 local mismatch = (hrp.Position - lastSetPos).Magnitude
                 if mismatch > 8 then
@@ -178,7 +230,7 @@ local function chaseLoop(plr)
                 local timeout = tick() + duration + 1
                 while not done and tick() < timeout do
                     task.wait(0.01)
-                    if not State.TPChase or State.Target ~= plr then
+                    if not State.TPChase or State.Target ~= plr or not State.Loaded then
                         tween:Cancel()
                         conn:Disconnect()
                         if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
@@ -347,13 +399,13 @@ end)
 -- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV6"
+ui.Name = "ExtractV7"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 280)
-frame.Position = UDim2.new(0, 20, 0.5, -140)
+frame.Size = UDim2.new(0, 240, 0, 420)
+frame.Position = UDim2.new(0, 20, 0.5, -210)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -365,7 +417,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v6"
+title.Text = "Extract v7"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -428,6 +480,7 @@ local function makeToggle(textOff, textOn, y, colorOff, colorOn, initialState, o
     return btn
 end
 
+-- Combat section
 makeToggle(
     "TP Chase: OFF", "TP Chase: ON",
     95, Color3.fromRGB(80, 80, 80), Color3.fromRGB(70, 140, 220), false,
@@ -477,10 +530,46 @@ lavaBtn.MouseButton1Click:Connect(function()
     lavaBtn.Text = "Remove Lava"
 end)
 
--- Unload button
+-- Haki section
+local hakiLabel = Instance.new("TextLabel")
+hakiLabel.Size = UDim2.new(1, -20, 0, 20)
+hakiLabel.Position = UDim2.new(0, 10, 0, 235)
+hakiLabel.BackgroundTransparency = 1
+hakiLabel.Text = "— Haki / Race —"
+hakiLabel.TextColor3 = Color3.fromRGB(140, 140, 160)
+hakiLabel.Font = Enum.Font.GothamBold
+hakiLabel.TextSize = 11
+hakiLabel.TextXAlignment = Enum.TextXAlignment.Left
+hakiLabel.Parent = frame
+
+makeToggle(
+    "Auto Ken: OFF", "Auto Ken: ON",
+    255, Color3.fromRGB(80, 80, 80), Color3.fromRGB(140, 100, 220), false,
+    function(v) State.AutoKen = v end
+)
+
+makeToggle(
+    "Auto Buso: OFF", "Auto Buso: ON",
+    288, Color3.fromRGB(80, 80, 80), Color3.fromRGB(180, 100, 100), false,
+    function(v) State.AutoBuso = v end
+)
+
+makeToggle(
+    "Auto V3: OFF", "Auto V3: ON",
+    321, Color3.fromRGB(80, 80, 80), Color3.fromRGB(100, 180, 140), false,
+    function(v) State.AutoV3 = v end
+)
+
+makeToggle(
+    "Auto V4: OFF", "Auto V4: ON",
+    354, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 160, 60), false,
+    function(v) State.AutoV4 = v end
+)
+
+-- Unload
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 235)
+unloadBtn.Position = UDim2.new(0, 10, 0, 388)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 unloadBtn.BorderSizePixel = 0
 unloadBtn.Text = "Unload"
@@ -492,14 +581,21 @@ Instance.new("UICorner", unloadBtn).CornerRadius = UDim.new(0, 5)
 unloadBtn.MouseButton1Click:Connect(function()
     State.TPChase = false
     State.AutoM1 = false
+    State.AutoKen = false
+    State.AutoBuso = false
+    State.AutoV3 = false
+    State.AutoV4 = false
+    State.Loaded = false
     if heartbeatConn then heartbeatConn:Disconnect() end
     if ui then ui:Destroy() end
     getgenv().ExtractV6_Lock = false
-    print("[Extract v6] Unloaded.")
+    print("[Extract v7] Unloaded.")
 end)
 
+-- Target info updater
 task.spawn(function()
-    while task.wait(0.2) do
+    while State.Loaded do
+        task.wait(0.2)
         if not ui.Parent then break end
         local t = State.Target
         if t and t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
@@ -515,4 +611,4 @@ task.spawn(function()
     end
 end)
 
-print("[Extract v6] Loaded. Single-instance locked. Unload to release.")
+print("[Extract v7] Loaded. Haki/Race auto loops active.")
