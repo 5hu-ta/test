@@ -1,17 +1,16 @@
 --[[
-    Blox Fruits — Extract v7
-    New:
-      - Auto Ken (Observation Haki)   via CommE:FireServer("Ken", true)
-      - Auto Buso (Armament Haki)     via CommF_ InvokeServer("BuyHaki"/"Buso")
-      - Auto V3 (Agility)             via CommE:FireServer("ActivateAbility")
-      - Auto V4 (Race transform)      via Backpack.Awakening.RemoteFunction
+    Blox Fruits — Extract v10
+    Changes:
+      - FastMode / NoFog / FPS Boost are always-on (no toggles)
+      - Status panel (top-right corner) shows working state
+      - FPS Boost reapplied every 60s to survive map changes
 ]]
 
 -- ============================================
 -- SINGLE INSTANCE GUARD
 -- ============================================
 if getgenv().ExtractV6_Lock then
-    warn("[Extract v7] Already running. Click 'Unload' in the existing UI first.")
+    warn("[Extract v10] Already running. Click 'Unload' in the existing UI first.")
     return
 end
 getgenv().ExtractV6_Lock = true
@@ -34,9 +33,12 @@ local State = {
     AutoBuso = false,
     AutoV3 = false,
     AutoV4 = false,
+    NoFog = true,
+    AutoFastMode = true,
     Target = nil,
     TargetIndex = 1,
     TargetList = {},
+    FarBlacklist = {},
     ChaseSpeed = 250,
     ChunkSize = 200,
     ChunkWait = 0.02,
@@ -48,12 +50,70 @@ local State = {
     MaxTargetDistance = 75000,
 }
 
+local Runtime = {
+    NoFogApplied = false,
+    FastModeActive = false,
+    FPSApplied = false,
+}
+
 -- ============================================
 -- HELPERS
 -- ============================================
 local function getChar() return LP.Character end
 local function getHRP() return getChar() and getChar():FindFirstChild("HumanoidRootPart") end
 local function getHum() return getChar() and getChar():FindFirstChildOfClass("Humanoid") end
+
+-- ============================================
+-- PERFORMANCE MODULE (FastMode)
+-- ============================================
+local Performance = nil
+do
+    local function tryRequire(path)
+        local node = ReplicatedStorage
+        for _, seg in ipairs(path) do
+            node = node and node:FindFirstChild(seg)
+            if not node then return nil end
+        end
+        local ok, res = pcall(require, node)
+        return ok and res or nil
+    end
+    local candidates = {
+        {"Modules", "Performance"},
+        {"Performance"},
+        {"Modules", "Net", "Performance"},
+    }
+    for _, path in ipairs(candidates) do
+        local p = tryRequire(path)
+        if p and (p.SetFastMode or p.FastMode ~= nil) then
+            Performance = p
+            break
+        end
+    end
+    if not Performance then
+        warn("[Extract v10] Performance module not found. FastMode disabled.")
+    end
+end
+
+local function setFastMode(on)
+    if not Performance then return end
+    if Performance.SetFastMode then
+        pcall(function() Performance.SetFastMode(on) end)
+    end
+end
+
+-- FastMode maintenance: apply at load, reapply every 3s
+task.spawn(function()
+    if not Performance then return end
+    setFastMode(true)
+    Runtime.FastModeActive = true
+    while State.Loaded do
+        task.wait(3)
+        if Performance.FastMode ~= true then
+            setFastMode(true)
+        end
+        Runtime.FastModeActive = (Performance.FastMode == true)
+    end
+end)
 
 -- ============================================
 -- REMOVE LAVA
@@ -78,6 +138,80 @@ local function removeLava()
 end
 
 -- ============================================
+-- NO FOG (always-on)
+-- ============================================
+local function applyNoFog()
+    local lighting = game:GetService("Lighting")
+    lighting.FogEnd = math.huge
+    for _, name in ipairs({"FantasySky", "LightingLayers", "Sky", "SeaTerrorCC"}) do
+        local obj = lighting:FindFirstChild(name)
+        if obj then pcall(function() obj:Destroy() end) end
+    end
+    Runtime.NoFogApplied = true
+end
+
+-- ============================================
+-- FORCE FPS BOOST (always-on, reapply 60s)
+-- ============================================
+local function forceFPSBoost()
+    local lighting = game:GetService("Lighting")
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        terrain.WaterWaveSize = 0
+        terrain.WaterWaveSpeed = 0
+        terrain.WaterReflectance = 0
+        terrain.WaterTransparency = 0
+    end
+    lighting.GlobalShadows = false
+    lighting.FogEnd = 9e9
+    pcall(function() settings().Rendering.QualityLevel = 1 end)
+
+    for _, d in pairs(game:GetDescendants()) do
+        if d:IsA("Part") or d:IsA("UnionOperation") or d:IsA("MeshPart")
+            or d:IsA("CornerWedgePart") or d:IsA("TrussPart") then
+            pcall(function()
+                d.Material = Enum.Material.Plastic
+                d.Reflectance = 0
+            end)
+        elseif d:IsA("Decal") then
+            pcall(function() d.Transparency = 1 end)
+        elseif d:IsA("ParticleEmitter") or d:IsA("Trail") then
+            pcall(function() d.Lifetime = NumberRange.new(0) end)
+        elseif d:IsA("Explosion") then
+            pcall(function()
+                d.BlastPressure = 1
+                d.BlastRadius = 1
+            end)
+        end
+    end
+
+    for _, d in pairs(lighting:GetDescendants()) do
+        if d:IsA("BlurEffect") or d:IsA("SunRaysEffect")
+            or d:IsA("ColorCorrectionEffect") or d:IsA("BloomEffect")
+            or d:IsA("DepthOfFieldEffect") then
+            pcall(function() d.Enabled = false end)
+        end
+    end
+
+    for _, d in pairs(workspace:GetDescendants()) do
+        if d:IsA("ForceField") or d:IsA("Sparkles")
+            or d:IsA("Smoke") or d:IsA("Fire") then
+            pcall(function() d:Destroy() end)
+        end
+    end
+    Runtime.FPSApplied = true
+end
+
+-- FPS Boost maintenance
+task.spawn(function()
+    task.wait(0.5)
+    while State.Loaded do
+        pcall(forceFPSBoost)
+        task.wait(60)
+    end
+end)
+
+-- ============================================
 -- HAKI REMOTES
 -- ============================================
 local function getRemotes()
@@ -86,9 +220,9 @@ local function getRemotes()
     return remotes:FindFirstChild("CommF_"), remotes:FindFirstChild("CommE")
 end
 
--- periodic loop for Ken / Buso / V3 / V4
 task.spawn(function()
     while State.Loaded do
+        if State.NoFog then pcall(applyNoFog) end
         local char = getChar()
         if char then
             local commF, commE = getRemotes()
@@ -130,7 +264,7 @@ task.spawn(function()
 end)
 
 -- ============================================
--- TP CHASE — anti-rubberband orbit
+-- TP CHASE
 -- ============================================
 local tpRunning = false
 
@@ -144,6 +278,8 @@ local function chaseLoop(plr)
     local lastSetPos = nil
     local rubberbandHits = 0
     local effectiveOrbitSpeed = State.OrbitSpeed
+    local waitActive = false
+    local waitUntil = 0
 
     while State.TPChase and State.Target == plr and State.Loaded do
         local hrp = getHRP()
@@ -154,96 +290,137 @@ local function chaseLoop(plr)
 
         local tPos = tHRP.Position
         local myPos = hrp.Position
-        if (tPos - myPos).Magnitude > State.MaxTargetDistance then break end
-        local targetCenter = tPos + Vector3.new(0, State.OrbitHeight, 0)
+        local dist = (tPos - myPos).Magnitude
 
-        local horizDist = (Vector3.new(tPos.X, myPos.Y, tPos.Z) - myPos).Magnitude
-
-        if not orbitActive and horizDist < State.OrbitRadius + 10 then
-            orbitActive = true
-            local rel = myPos - targetCenter
-            orbitAngle = math.atan2(rel.Z, rel.X)
-            smoothedCenter = targetCenter
+        if not waitActive and dist > State.MaxTargetDistance then
+            local nearbyEnemy = false
+            for _, other in ipairs(Players:GetPlayers()) do
+                if other ~= LP and other ~= plr then
+                    local oHRP = other.Character and other.Character:FindFirstChild("HumanoidRootPart")
+                    local oHum = other.Character and other.Character:FindFirstChildOfClass("Humanoid")
+                    if oHRP and oHum and oHum.Health > 0 then
+                        if (oHRP.Position - myPos).Magnitude <= 1500 then
+                            nearbyEnemy = true
+                            break
+                        end
+                    end
+                end
+            end
+            if not nearbyEnemy then
+                waitActive = true
+                waitUntil = tick() + 3
+                hrp.Anchored = true
+            else
+                State.Target = nil
+                break
+            end
         end
 
-        if orbitActive then
-            local dt = task.wait()
-
-            if smoothedCenter and (smoothedCenter - targetCenter).Magnitude > 60 then
-                smoothedCenter = targetCenter
+        if waitActive then
+            if dist <= State.MaxTargetDistance then
+                waitActive = false
+                hrp.Anchored = false
+                orbitActive = false
+                smoothedCenter = nil
+            elseif tick() >= waitUntil then
+                waitActive = false
+                hrp.Anchored = false
+                State.FarBlacklist[plr.UserId] = tick() + 10
+                State.Target = nil
+                break
+            else
+                task.wait(0.05)
             end
+        end
 
-            if not smoothedCenter then smoothedCenter = targetCenter end
-            smoothedCenter = smoothedCenter:Lerp(targetCenter, math.min(1, 15 * dt))
+        if not waitActive then
+            local targetCenter = tPos + Vector3.new(0, State.OrbitHeight, 0)
+            local horizDist = (Vector3.new(tPos.X, myPos.Y, tPos.Z) - myPos).Magnitude
 
-            orbitAngle = orbitAngle + effectiveOrbitSpeed * dt
-
-            local offset = Vector3.new(
-                math.cos(orbitAngle) * State.OrbitRadius,
-                0,
-                math.sin(orbitAngle) * State.OrbitRadius
-            )
-            local newPos = smoothedCenter + offset
-
-            local moveDelta = (newPos - hrp.Position).Magnitude
-            if moveDelta > 8 then
-                newPos = hrp.Position + (newPos - hrp.Position).Unit * 8
-            end
-
-            hrp.CFrame = CFrame.lookAt(newPos, Vector3.new(tPos.X, newPos.Y, tPos.Z))
-
-            if lastSetPos then
-                local mismatch = (hrp.Position - lastSetPos).Magnitude
-                if mismatch > 8 then
-                    rubberbandHits = rubberbandHits + 1
-                    if rubberbandHits >= 3 then
-                        effectiveOrbitSpeed = math.max(3, effectiveOrbitSpeed * 0.7)
-                        rubberbandHits = 0
-                    end
-                else
-                    rubberbandHits = math.max(0, rubberbandHits - 1)
-                    effectiveOrbitSpeed = math.min(State.OrbitSpeed, effectiveOrbitSpeed + 0.2)
-                end
-            end
-            lastSetPos = newPos
-        else
-            local dist = (targetCenter - myPos).Magnitude
-            if dist < 5 then
+            if not orbitActive and horizDist < State.OrbitRadius + 10 then
                 orbitActive = true
-                smoothedCenter = targetCenter
                 local rel = myPos - targetCenter
                 orbitAngle = math.atan2(rel.Z, rel.X)
-            else
-                local chunkMove = math.min(dist, State.ChunkSize)
-                local direction = (targetCenter - myPos).Unit
-                local chunkTarget = myPos + direction * chunkMove
-                local duration = chunkMove / State.ChaseSpeed
+                smoothedCenter = targetCenter
+            end
 
-                local tween = TweenService:Create(
-                    hrp,
-                    TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
-                    {CFrame = CFrame.new(chunkTarget, chunkTarget + direction * 5)}
+            if orbitActive then
+                local dt = task.wait()
+                if smoothedCenter and (smoothedCenter - targetCenter).Magnitude > 60 then
+                    smoothedCenter = targetCenter
+                end
+                if not smoothedCenter then smoothedCenter = targetCenter end
+                smoothedCenter = smoothedCenter:Lerp(targetCenter, math.min(1, 15 * dt))
+                orbitAngle = orbitAngle + effectiveOrbitSpeed * dt
+
+                local offset = Vector3.new(
+                    math.cos(orbitAngle) * State.OrbitRadius,
+                    0,
+                    math.sin(orbitAngle) * State.OrbitRadius
                 )
-                tween:Play()
+                local newPos = smoothedCenter + offset
+                local moveDelta = (newPos - hrp.Position).Magnitude
+                if moveDelta > 8 then
+                    newPos = hrp.Position + (newPos - hrp.Position).Unit * 8
+                end
+                hrp.CFrame = CFrame.lookAt(newPos, Vector3.new(tPos.X, newPos.Y, tPos.Z))
 
-                local done = false
-                local conn
-                conn = tween.Completed:Connect(function() done = true; conn:Disconnect() end)
-                local timeout = tick() + duration + 1
-                while not done and tick() < timeout do
-                    task.wait(0.01)
-                    if not State.TPChase or State.Target ~= plr or not State.Loaded then
-                        tween:Cancel()
-                        conn:Disconnect()
-                        if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
-                        return
+                if lastSetPos then
+                    local mismatch = (hrp.Position - lastSetPos).Magnitude
+                    if mismatch > 8 then
+                        rubberbandHits = rubberbandHits + 1
+                        if rubberbandHits >= 3 then
+                            effectiveOrbitSpeed = math.max(3, effectiveOrbitSpeed * 0.7)
+                            rubberbandHits = 0
+                        end
+                    else
+                        rubberbandHits = math.max(0, rubberbandHits - 1)
+                        effectiveOrbitSpeed = math.min(State.OrbitSpeed, effectiveOrbitSpeed + 0.2)
                     end
                 end
-                task.wait(State.ChunkWait)
+                lastSetPos = newPos
+            else
+                local distToCenter = (targetCenter - myPos).Magnitude
+                if distToCenter < 5 then
+                    orbitActive = true
+                    smoothedCenter = targetCenter
+                    local rel = myPos - targetCenter
+                    orbitAngle = math.atan2(rel.Z, rel.X)
+                else
+                    local chunkMove = math.min(distToCenter, State.ChunkSize)
+                    local direction = (targetCenter - myPos).Unit
+                    local chunkTarget = myPos + direction * chunkMove
+                    local duration = chunkMove / State.ChaseSpeed
+
+                    local tween = TweenService:Create(
+                        hrp,
+                        TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+                        {CFrame = CFrame.new(chunkTarget, chunkTarget + direction * 5)}
+                    )
+                    tween:Play()
+
+                    local done = false
+                    local conn
+                    conn = tween.Completed:Connect(function() done = true; conn:Disconnect() end)
+                    local timeout = tick() + duration + 1
+                    while not done and tick() < timeout do
+                        task.wait(0.01)
+                        if not State.TPChase or State.Target ~= plr or not State.Loaded then
+                            tween:Cancel()
+                            conn:Disconnect()
+                            hrp.Anchored = false
+                            if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
+                            return
+                        end
+                    end
+                    task.wait(State.ChunkWait)
+                end
             end
         end
     end
 
+    local hrp = getHRP()
+    if hrp then hrp.Anchored = false end
     if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
 end
 
@@ -324,8 +501,12 @@ local function rebuildTargetList()
     local hrp = getHRP()
     local list = {}
     if hrp then
+        for uid, expiry in pairs(State.FarBlacklist) do
+            if tick() >= expiry then State.FarBlacklist[uid] = nil end
+        end
+
         for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LP then
+            if plr ~= LP and not State.FarBlacklist[plr.UserId] then
                 local tChar = plr.Character
                 local tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
                 local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
@@ -400,16 +581,16 @@ local heartbeatConn = RunService.Heartbeat:Connect(function()
 end)
 
 -- ============================================
--- UI
+-- UI (main control panel)
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV7"
+ui.Name = "ExtractV10"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 420)
-frame.Position = UDim2.new(0, 20, 0.5, -210)
+frame.Size = UDim2.new(0, 240, 0, 430)
+frame.Position = UDim2.new(0, 20, 0.5, -215)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -421,7 +602,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v7"
+title.Text = "Extract v10"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -484,7 +665,6 @@ local function makeToggle(textOff, textOn, y, colorOff, colorOn, initialState, o
     return btn
 end
 
--- Combat section
 makeToggle(
     "TP Chase: OFF", "TP Chase: ON",
     95, Color3.fromRGB(80, 80, 80), Color3.fromRGB(70, 140, 220), false,
@@ -573,7 +753,7 @@ makeToggle(
 -- Unload
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 388)
+unloadBtn.Position = UDim2.new(0, 10, 0, 395)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 unloadBtn.BorderSizePixel = 0
 unloadBtn.Text = "Unload"
@@ -582,6 +762,55 @@ unloadBtn.Font = Enum.Font.GothamBold
 unloadBtn.TextSize = 11
 unloadBtn.Parent = frame
 Instance.new("UICorner", unloadBtn).CornerRadius = UDim.new(0, 5)
+
+-- ============================================
+-- STATUS PANEL (top-right corner)
+-- ============================================
+local statusGui = Instance.new("ScreenGui")
+statusGui.Name = "ExtractStatus"
+statusGui.ResetOnSpawn = false
+statusGui.Parent = LP:WaitForChild("PlayerGui")
+
+local statusFrame = Instance.new("Frame")
+statusFrame.Size = UDim2.new(0, 170, 0, 76)
+statusFrame.Position = UDim2.new(1, -180, 0, 10)
+statusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+statusFrame.BackgroundTransparency = 0.2
+statusFrame.BorderSizePixel = 0
+statusFrame.Parent = statusGui
+Instance.new("UICorner", statusFrame).CornerRadius = UDim.new(0, 6)
+
+local statusTitle = Instance.new("TextLabel")
+statusTitle.Size = UDim2.new(1, -10, 0, 18)
+statusTitle.Position = UDim2.new(0, 8, 0, 4)
+statusTitle.BackgroundTransparency = 1
+statusTitle.Text = "Status"
+statusTitle.TextColor3 = Color3.fromRGB(160, 160, 180)
+statusTitle.Font = Enum.Font.GothamBold
+statusTitle.TextSize = 11
+statusTitle.TextXAlignment = Enum.TextXAlignment.Left
+statusTitle.Parent = statusFrame
+
+local function makeStatusLine(y)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -10, 0, 16)
+    lbl.Position = UDim2.new(0, 8, 0, y)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = "…"
+    lbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = statusFrame
+    return lbl
+end
+
+local nofogLine     = makeStatusLine(24)
+local fastmodeLine  = makeStatusLine(40)
+local fpsLine       = makeStatusLine(56)
+
+local unloadBtn = unloadBtn  -- alias for closure
+
 unloadBtn.MouseButton1Click:Connect(function()
     State.TPChase = false
     State.AutoM1 = false
@@ -590,17 +819,55 @@ unloadBtn.MouseButton1Click:Connect(function()
     State.AutoV3 = false
     State.AutoV4 = false
     State.Loaded = false
+    local hrp = getHRP()
+    if hrp then hrp.Anchored = false end
     if heartbeatConn then heartbeatConn:Disconnect() end
     if ui then ui:Destroy() end
+    if statusGui then statusGui:Destroy() end
     getgenv().ExtractV6_Lock = false
-    print("[Extract v7] Unloaded.")
+    print("[Extract v10] Unloaded.")
+end)
+
+-- Status updater
+task.spawn(function()
+    while State.Loaded do
+        task.wait(1)
+        if not statusFrame.Parent then break end
+
+        if Runtime.NoFogApplied then
+            nofogLine.Text = "✓ NoFog working"
+            nofogLine.TextColor3 = Color3.fromRGB(100, 220, 140)
+        else
+            nofogLine.Text = "… NoFog pending"
+            nofogLine.TextColor3 = Color3.fromRGB(220, 180, 80)
+        end
+
+        if Performance and Performance.FastMode == true then
+            fastmodeLine.Text = "✓ FastMode working"
+            fastmodeLine.TextColor3 = Color3.fromRGB(100, 220, 140)
+        elseif Performance then
+            fastmodeLine.Text = "… FastMode pending"
+            fastmodeLine.TextColor3 = Color3.fromRGB(220, 180, 80)
+        else
+            fastmodeLine.Text = "✗ FastMode N/A"
+            fastmodeLine.TextColor3 = Color3.fromRGB(220, 100, 100)
+        end
+
+        if Runtime.FPSApplied then
+            fpsLine.Text = "✓ FPS Boost working"
+            fpsLine.TextColor3 = Color3.fromRGB(100, 220, 140)
+        else
+            fpsLine.Text = "… FPS Boost pending"
+            fpsLine.TextColor3 = Color3.fromRGB(220, 180, 80)
+        end
+    end
 end)
 
 -- Target info updater
 task.spawn(function()
     while State.Loaded do
         task.wait(0.2)
-        if not ui.Parent then break end
+        if not frame.Parent then break end
         local t = State.Target
         if t and t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
             local hrp = getHRP()
@@ -615,4 +882,4 @@ task.spawn(function()
     end
 end)
 
-print("[Extract v7] Loaded. Haki/Race auto loops active.")
+print("[Extract v10] Loaded. FastMode/NoFog/FPSBoost always-on.")
