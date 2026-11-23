@@ -1,0 +1,263 @@
+-- Blox Fruits Auto Bounty (Original - No Skid)
+-- Range: Unlimited | Target: All alive players | Track: Yes | All Tools: Yes | All Seas: Yes | Safezone Penetrate: Yes
+-- UI: Pure Custom (No Library)
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local StarterGui = game:GetService("StarterGui")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+local Humanoid = Character:WaitForChild("Humanoid")
+
+local function Notify(title, text, duration)
+    StarterGui:SetCore("SendNotification", {
+        Title = title,
+        Text = text,
+        Duration = duration or 3
+    })
+end
+
+getgenv().AutoBounty = {
+    Enabled = false,
+    attackDelay = 0.11,
+    skillDelay = 0.32,
+    trackOffset = Vector3.new(0, 1.5, 4)
+}
+
+local currentTarget = nil
+local lastAttack = 0
+local lastSkill = 0
+local skillKeys = {"Z", "X", "C", "V", "F"}
+
+LocalPlayer.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
+
+local function getTools()
+    local tools = {melee = nil, fruit = nil, gun = nil}
+    local sources = {LocalPlayer.Backpack, Character}
+    for _, source in pairs(sources) do
+        for _, tool in pairs(source:GetChildren()) do
+            if tool:IsA("Tool") then
+                local name = tool.Name:lower()
+                if name:find("combat") or name:find("dark step") or name:find("electric") or name:find("water") or name:find("dragon") or name:find("superhuman") or name:find("death") or name:find("sharkman") or name:find("godhuman") or name:find("sanguine") or name:find("advanced") then
+                    tools.melee = tool
+                elseif tool:FindFirstChild("Fruit") or name:find("fruit") or name:find("dough") or name:find("kitsune") or name:find("dragon") or name:find("leopard") or name:find("control") or name:find("ice") or name:find("magma") or name:find("light") or name:find("dark") or name:find("buddha") or name:find("portal") or name:find("spirit") or name:find("shadow") or name:find("venom") or name:find("quake") or name:find("string") or name:find("rumble") or name:find("paw") or name:find("gravity") or name:find("phoenix") or name:find("magnet") or name:find("tiger") or name:find("gas") then
+                    tools.fruit = tool
+                elseif name:find("gun") or name:find("rifle") or name:find("pistol") or name:find("musket") or name:find("flintlock") or name:find("slingshot") or name:find("bazooka") or name:find("cannon") or name:find("kabucha") or name:find("skull") or name:find("venom bow") or name:find("acidum") or name:find("bizarre") or name:find("dragonstorm") then
+                    tools.gun = tool
+                end
+            end
+        end
+    end
+    return tools
+end
+
+local function equipTool(tool)
+    if tool and tool.Parent ~= Character then
+        pcall(function()
+            Humanoid:EquipTool(tool)
+        end)
+    end
+end
+
+local function doM1()
+    VirtualUser:CaptureController()
+    VirtualUser:Button1Down(Vector2.new(0, 0))
+    task.wait(0.04)
+    VirtualUser:Button1Up(Vector2.new(0, 0))
+end
+
+local function doSkill(key)
+    VirtualInputManager:SendKeyEvent(true, key, false, game)
+    task.wait(0.04)
+    VirtualInputManager:SendKeyEvent(false, key, false, game)
+end
+
+local function getNearestTarget()
+    local nearest = nil
+    local shortest = math.huge
+    local myPos = HumanoidRootPart and HumanoidRootPart.Position or Vector3.zero
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+            local hum = player.Character:FindFirstChild("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                local dist = (myPos - hrp.Position).Magnitude
+                if dist < shortest then
+                    shortest = dist
+                    nearest = player
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+local connection
+local function startLoop()
+    if connection then connection:Disconnect() end
+    connection = RunService.Heartbeat:Connect(function()
+        if not getgenv().AutoBounty.Enabled then return end
+        pcall(function()
+            Character = LocalPlayer.Character
+            if not Character then return end
+            HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+            Humanoid = Character:FindFirstChild("Humanoid")
+            if not HumanoidRootPart or not Humanoid or Humanoid.Health <= 0 then return end
+
+            currentTarget = getNearestTarget()
+            if currentTarget and currentTarget.Character then
+                local targetHRP = currentTarget.Character:FindFirstChild("HumanoidRootPart")
+                local targetHum = currentTarget.Character:FindFirstChild("Humanoid")
+                if targetHRP and targetHum and targetHum.Health > 0 then
+                    -- Unlimited track
+                    local lookAt = CFrame.new(HumanoidRootPart.Position, targetHRP.Position)
+                    HumanoidRootPart.CFrame = lookAt * CFrame.new(0, 0, -getgenv().AutoBounty.trackOffset.Z) + Vector3.new(0, getgenv().AutoBounty.trackOffset.Y, 0)
+
+                    local now = tick()
+                    local tools = getTools()
+
+                    if now - lastAttack >= getgenv().AutoBounty.attackDelay then
+                        if tools.melee then equipTool(tools.melee) end
+                        doM1()
+                        if tools.fruit then
+                            equipTool(tools.fruit)
+                            doM1()
+                        end
+                        if tools.gun then
+                            equipTool(tools.gun)
+                            doM1()
+                        end
+                        lastAttack = now
+                    end
+
+                    if now - lastSkill >= getgenv().AutoBounty.skillDelay then
+                        for _, key in ipairs(skillKeys) do
+                            doSkill(key)
+                            task.wait(0.06)
+                        end
+                        lastSkill = now
+                    end
+                end
+            else
+                currentTarget = nil
+            end
+        end)
+    end)
+end
+
+-- Pure Custom UI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AutoBountyUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = CoreGui
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 280, 0, 180)
+Main.Position = UDim2.new(0.5, -140, 0.3, 0)
+Main.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Draggable = true
+Main.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 32)
+Title.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+Title.BorderSizePixel = 0
+Title.Text = "Auto Bounty"
+Title.TextColor3 = Color3.fromRGB(220, 220, 230)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 16
+Title.Parent = Main
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 8)
+TitleCorner.Parent = Title
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -32, 0, 2)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 14
+CloseBtn.Parent = Main
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 6)
+CloseCorner.Parent = CloseBtn
+
+CloseBtn.MouseButton1Click:Connect(function()
+    getgenv().AutoBounty.Enabled = false
+    if connection then connection:Disconnect() end
+    ScreenGui:Destroy()
+    Notify("Auto Bounty", "Closed", 2)
+end)
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0.9, 0, 0, 36)
+ToggleBtn.Position = UDim2.new(0.05, 0, 0, 50)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+ToggleBtn.Text = "Status: OFF"
+ToggleBtn.TextColor3 = Color3.fromRGB(220, 220, 230)
+ToggleBtn.Font = Enum.Font.Gotham
+ToggleBtn.TextSize = 14
+ToggleBtn.Parent = Main
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 6)
+ToggleCorner.Parent = ToggleBtn
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(0.9, 0, 0, 60)
+StatusLabel.Position = UDim2.new(0.05, 0, 0, 100)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "Range: Unlimited\nTarget: None\nKill All Players"
+StatusLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextSize = 13
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.TextYAlignment = Enum.TextYAlignment.Top
+StatusLabel.Parent = Main
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    getgenv().AutoBounty.Enabled = not getgenv().AutoBounty.Enabled
+    if getgenv().AutoBounty.Enabled then
+        ToggleBtn.Text = "Status: ON"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 120, 60)
+        startLoop()
+        Notify("Auto Bounty", "Enabled - Unlimited Range", 3)
+    else
+        ToggleBtn.Text = "Status: OFF"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+        if connection then connection:Disconnect() end
+        currentTarget = nil
+        Notify("Auto Bounty", "Disabled", 2)
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if StatusLabel and StatusLabel.Parent then
+        local targetName = currentTarget and currentTarget.Name or "None"
+        StatusLabel.Text = "Range: Unlimited\nTarget: " .. targetName .. "\nKill All Players Active"
+    end
+end)
+
+Notify("Auto Bounty", "Loaded - Unlimited Range Version", 4)
