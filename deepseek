@@ -1,17 +1,22 @@
 --[[
-    Blox Fruits — Extract v11
-    Changes from v10:
-      - FastMode removed entirely
-      - Auto-join Pirates on load (only if no team selected)
-      - Manual Join Pirates / Join Marines buttons added
-      - Status panel now only shows NoFog / FPS Boost
+    Blox Fruits — Extract v12
+    Changes from v11:
+      - Remove Lava runs automatically on load (button removed)
+      - Team selection via TEAM constant at top of script (buttons removed)
+      - FPS + Ping display added to status panel
 ]]
+
+-- ============================================
+-- ★ CONFIG — ここを書き換えるだけ ★
+-- TEAM: "Pirates" または "Marines"
+-- ============================================
+local TEAM = "Pirates"
 
 -- ============================================
 -- SINGLE INSTANCE GUARD
 -- ============================================
 if getgenv().ExtractV6_Lock then
-    warn("[Extract v11] Already running. Click 'Unload' in the existing UI first.")
+    warn("[Extract v12] Already running. Click 'Unload' in the existing UI first.")
     return
 end
 getgenv().ExtractV6_Lock = true
@@ -52,6 +57,9 @@ local State = {
 local Runtime = {
     NoFogApplied = false,
     FPSApplied = false,
+    FPS = 0,
+    Ping = 0,
+    LavaRemoved = false,
 }
 
 -- ============================================
@@ -68,35 +76,53 @@ local function getRemotes()
 end
 
 -- ============================================
--- AUTO JOIN PIRATES (only if no team)
+-- FPS / PING TRACKER
 -- ============================================
-local function tryJoinPirates()
+task.spawn(function()
+    local frames = 0
+    local lastTime = tick()
+    RunService.Heartbeat:Connect(function()
+        frames = frames + 1
+        local now = tick()
+        if now - lastTime >= 1 then
+            Runtime.FPS = frames / (now - lastTime)
+            frames = 0
+            lastTime = now
+        end
+        pcall(function()
+            Runtime.Ping = math.floor(LP:GetNetworkPing() * 1000)
+        end)
+    end)
+end)
+
+-- ============================================
+-- AUTO JOIN TEAM (uses TEAM constant)
+-- ============================================
+local function tryJoinTeam(teamName)
     local commF = getRemotes()
-    if not commF then return false, "no remote" end
-    if LP.Team then return false, "already in team" end
-    pcall(function() commF:InvokeServer("SetTeam", "Pirates") end)
+    if not commF then return false end
+    if LP.Team then return false end
+    pcall(function() commF:InvokeServer("SetTeam", teamName) end)
     task.wait(0.3)
-    return LP.Team ~= nil, "invoked"
+    return LP.Team ~= nil
 end
 
 task.spawn(function()
-    -- give the game a moment to spawn before team selection
     task.wait(2)
     for _ = 1, 15 do
         if not State.Loaded then return end
         if LP.Team then return end
-        local ok, reason = tryJoinPirates()
-        if ok then
-            print("[Extract v11] Auto-joined Pirates.")
+        if tryJoinTeam(TEAM) then
+            print("[Extract v12] Auto-joined " .. TEAM .. ".")
             return
         end
         task.wait(2)
     end
-    warn("[Extract v11] Auto-join Pirates timed out. Use the UI button.")
+    warn("[Extract v12] Auto-join " .. TEAM .. " timed out.")
 end)
 
 -- ============================================
--- REMOVE LAVA
+-- REMOVE LAVA (auto on load)
 -- ============================================
 local function removeLava()
     local removed = false
@@ -116,6 +142,19 @@ local function removeLava()
     end
     return removed
 end
+
+task.spawn(function()
+    task.wait(1)
+    for _ = 1, 10 do
+        if not State.Loaded then return end
+        if removeLava() then
+            Runtime.LavaRemoved = true
+            print("[Extract v12] Lava removed.")
+            return
+        end
+        task.wait(2)
+    end
+end)
 
 -- ============================================
 -- NO FOG (always-on)
@@ -557,13 +596,13 @@ end)
 -- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV11"
+ui.Name = "ExtractV12"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 540)
-frame.Position = UDim2.new(0, 20, 0.5, -270)
+frame.Size = UDim2.new(0, 240, 0, 460)
+frame.Position = UDim2.new(0, 20, 0.5, -230)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -575,7 +614,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v11"
+title.Text = "Extract v12"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -669,28 +708,10 @@ makeToggle(
     function(v) State.AutoM1 = v end
 )
 
-local lavaBtn = Instance.new("TextButton")
-lavaBtn.Size = UDim2.new(1, -20, 0, 28)
-lavaBtn.Position = UDim2.new(0, 10, 0, 200)
-lavaBtn.BackgroundColor3 = Color3.fromRGB(160, 80, 80)
-lavaBtn.BorderSizePixel = 0
-lavaBtn.Text = "Remove Lava"
-lavaBtn.TextColor3 = Color3.new(1, 1, 1)
-lavaBtn.Font = Enum.Font.GothamBold
-lavaBtn.TextSize = 12
-lavaBtn.Parent = frame
-Instance.new("UICorner", lavaBtn).CornerRadius = UDim.new(0, 5)
-lavaBtn.MouseButton1Click:Connect(function()
-    local ok = removeLava()
-    lavaBtn.Text = ok and "Lava removed!" or "No lava found"
-    task.wait(1.5)
-    lavaBtn.Text = "Remove Lava"
-end)
-
 -- Haki section
 local hakiLabel = Instance.new("TextLabel")
 hakiLabel.Size = UDim2.new(1, -20, 0, 20)
-hakiLabel.Position = UDim2.new(0, 10, 0, 235)
+hakiLabel.Position = UDim2.new(0, 10, 0, 205)
 hakiLabel.BackgroundTransparency = 1
 hakiLabel.Text = "— Haki / Race —"
 hakiLabel.TextColor3 = Color3.fromRGB(140, 140, 160)
@@ -701,90 +722,32 @@ hakiLabel.Parent = frame
 
 makeToggle(
     "Auto Ken: OFF", "Auto Ken: ON",
-    255, Color3.fromRGB(80, 80, 80), Color3.fromRGB(140, 100, 220), false,
+    225, Color3.fromRGB(80, 80, 80), Color3.fromRGB(140, 100, 220), false,
     function(v) State.AutoKen = v end
 )
 
 makeToggle(
     "Auto Buso: OFF", "Auto Buso: ON",
-    288, Color3.fromRGB(80, 80, 80), Color3.fromRGB(180, 100, 100), false,
+    258, Color3.fromRGB(80, 80, 80), Color3.fromRGB(180, 100, 100), false,
     function(v) State.AutoBuso = v end
 )
 
 makeToggle(
     "Auto V3: OFF", "Auto V3: ON",
-    321, Color3.fromRGB(80, 80, 80), Color3.fromRGB(100, 180, 140), false,
+    291, Color3.fromRGB(80, 80, 80), Color3.fromRGB(100, 180, 140), false,
     function(v) State.AutoV3 = v end
 )
 
 makeToggle(
     "Auto V4: OFF", "Auto V4: ON",
-    354, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 160, 60), false,
+    324, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 160, 60), false,
     function(v) State.AutoV4 = v end
 )
-
--- Team section
-local teamLabel = Instance.new("TextLabel")
-teamLabel.Size = UDim2.new(1, -20, 0, 20)
-teamLabel.Position = UDim2.new(0, 10, 0, 389)
-teamLabel.BackgroundTransparency = 1
-teamLabel.Text = "— Team —"
-teamLabel.TextColor3 = Color3.fromRGB(140, 140, 160)
-teamLabel.Font = Enum.Font.GothamBold
-teamLabel.TextSize = 11
-teamLabel.TextXAlignment = Enum.TextXAlignment.Left
-teamLabel.Parent = frame
-
-local piratesBtn = Instance.new("TextButton")
-piratesBtn.Size = UDim2.new(0.5, -15, 0, 28)
-piratesBtn.Position = UDim2.new(0, 10, 0, 409)
-piratesBtn.BackgroundColor3 = Color3.fromRGB(120, 60, 60)
-piratesBtn.BorderSizePixel = 0
-piratesBtn.Text = "Join Pirates"
-piratesBtn.TextColor3 = Color3.new(1, 1, 1)
-piratesBtn.Font = Enum.Font.GothamBold
-piratesBtn.TextSize = 11
-piratesBtn.Parent = frame
-Instance.new("UICorner", piratesBtn).CornerRadius = UDim.new(0, 5)
-piratesBtn.MouseButton1Click:Connect(function()
-    local commF = getRemotes()
-    if not commF then
-        piratesBtn.Text = "No remote"
-        task.wait(1.2); piratesBtn.Text = "Join Pirates"
-        return
-    end
-    pcall(function() commF:InvokeServer("SetTeam", "Pirates") end)
-    piratesBtn.Text = "Joined!"
-    task.wait(1.2); piratesBtn.Text = "Join Pirates"
-end)
-
-local marinesBtn = Instance.new("TextButton")
-marinesBtn.Size = UDim2.new(0.5, -15, 0, 28)
-marinesBtn.Position = UDim2.new(0.5, 5, 0, 409)
-marinesBtn.BackgroundColor3 = Color3.fromRGB(60, 90, 160)
-marinesBtn.BorderSizePixel = 0
-marinesBtn.Text = "Join Marines"
-marinesBtn.TextColor3 = Color3.new(1, 1, 1)
-marinesBtn.Font = Enum.Font.GothamBold
-marinesBtn.TextSize = 11
-marinesBtn.Parent = frame
-Instance.new("UICorner", marinesBtn).CornerRadius = UDim.new(0, 5)
-marinesBtn.MouseButton1Click:Connect(function()
-    local commF = getRemotes()
-    if not commF then
-        marinesBtn.Text = "No remote"
-        task.wait(1.2); marinesBtn.Text = "Join Marines"
-        return
-    end
-    pcall(function() commF:InvokeServer("SetTeam", "Marines") end)
-    marinesBtn.Text = "Joined!"
-    task.wait(1.2); marinesBtn.Text = "Join Marines"
-end)
 
 -- Unload
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 449)
+unloadBtn.Position = UDim2.new(0, 10, 0, 365)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 unloadBtn.BorderSizePixel = 0
 unloadBtn.Text = "Unload"
@@ -803,7 +766,7 @@ statusGui.ResetOnSpawn = false
 statusGui.Parent = LP:WaitForChild("PlayerGui")
 
 local statusFrame = Instance.new("Frame")
-statusFrame.Size = UDim2.new(0, 170, 0, 60)
+statusFrame.Size = UDim2.new(0, 170, 0, 96)
 statusFrame.Position = UDim2.new(1, -180, 0, 10)
 statusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 statusFrame.BackgroundTransparency = 0.2
@@ -837,7 +800,9 @@ local function makeStatusLine(y)
 end
 
 local nofogLine = makeStatusLine(24)
-local fpsLine   = makeStatusLine(42)
+local fpsLine   = makeStatusLine(40)
+local perfLine  = makeStatusLine(56)
+local lavaLine  = makeStatusLine(74)
 
 unloadBtn.MouseButton1Click:Connect(function()
     State.TPChase = false
@@ -853,7 +818,7 @@ unloadBtn.MouseButton1Click:Connect(function()
     if ui then ui:Destroy() end
     if statusGui then statusGui:Destroy() end
     getgenv().ExtractV6_Lock = false
-    print("[Extract v11] Unloaded.")
+    print("[Extract v12] Unloaded.")
 end)
 
 -- Status updater
@@ -877,6 +842,25 @@ task.spawn(function()
             fpsLine.Text = "… FPS Boost pending"
             fpsLine.TextColor3 = Color3.fromRGB(220, 180, 80)
         end
+
+        if Runtime.LavaRemoved then
+            lavaLine.Text = "✓ Lava removed"
+            lavaLine.TextColor3 = Color3.fromRGB(100, 220, 140)
+        else
+            lavaLine.Text = "… Lava pending"
+            lavaLine.TextColor3 = Color3.fromRGB(220, 180, 80)
+        end
+
+        local ping = Runtime.Ping
+        local fps = math.floor(Runtime.FPS + 0.5)
+        perfLine.Text = string.format("FPS: %d   Ping: %dms", fps, ping)
+        if fps >= 40 and ping < 150 then
+            perfLine.TextColor3 = Color3.fromRGB(100, 220, 140)
+        elseif fps >= 20 and ping < 300 then
+            perfLine.TextColor3 = Color3.fromRGB(220, 200, 100)
+        else
+            perfLine.TextColor3 = Color3.fromRGB(220, 100, 100)
+        end
     end
 end)
 
@@ -897,6 +881,9 @@ task.spawn(function()
             targetId.Text = "ID: -   Dist: -"
         end
     end
+end)
+
+print("[Extract v12] Loaded. Team=" .. TEAM .. " | Lava auto-remove | FPS/Ping displayed.")
 end)
 
 print("[Extract v11] Loaded. FastMode removed. Auto-join Pirates on load.")
