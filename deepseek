@@ -1,9 +1,10 @@
 --[[
-    Blox Fruits — Extract v3
-    New:
-      - Target info display (name + UserId + distance)
-      - "Next Target" button (cycle by distance)
-      - ChaseSpeed raised to 220 (still chunked)
+    Blox Fruits — Extract v4
+    Changes:
+      - TP: per-chunk target position recompute (no trail following)
+      - Portal X handled naturally (next chunk redirects to new position)
+      - ChaseSpeed 220 -> 800 (max practical)
+      - ChunkSize 350 -> 200, ChunkWait 0.05 -> 0.02
 ]]
 
 local Players = game:GetService("Players")
@@ -13,25 +14,19 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 
--- ============================================
--- STATE
--- ============================================
 local State = {
     TPChase = false,
     AutoM1 = false,
     Target = nil,
     TargetIndex = 1,
     TargetList = {},
-    ChaseSpeed = 220,
-    ChunkSize = 350,
-    ChunkWait = 0.05,
+    ChaseSpeed = 800,
+    ChunkSize = 200,
+    ChunkWait = 0.02,
     AttackRange = 60,
     BuddhaRange = 1000,
 }
 
--- ============================================
--- HELPERS
--- ============================================
 local function getChar() return LP.Character end
 local function getHRP() return getChar() and getChar():FindFirstChild("HumanoidRootPart") end
 local function getHum() return getChar() and getChar():FindFirstChildOfClass("Humanoid") end
@@ -59,39 +54,36 @@ local function removeLava()
 end
 
 -- ============================================
--- TP (chunked)
+-- TP CHASE — per-chunk target recompute
 -- ============================================
-local function tweenHRPTo(targetPos, speed)
-    local hrp = getHRP()
-    if not hrp then return end
-    local startPos = hrp.Position
-    local totalDist = (targetPos - startPos).Magnitude
-    if totalDist < 1 then return end
+local tpRunning = false
 
+local function chaseLoop(plr)
     local hum = getHum()
     if hum then hum:ChangeState(Enum.HumanoidStateType.Physics) end
 
-    local chunks = math.ceil(totalDist / State.ChunkSize)
-    local chunkDist = totalDist / chunks
+    while State.TPChase and State.Target == plr do
+        local hrp = getHRP()
+        local tChar = plr.Character
+        local tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
+        local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+        if not (hrp and tHRP and tHum) or tHum.Health <= 0 then break end
 
-    for i = 1, chunks do
-        if not State.TPChase then break end
-        hrp = getHRP()
-        if not hrp then break end
+        -- recompute every chunk: always aim at CURRENT position
+        local myPos = hrp.Position
+        local tPos = tHRP.Position - Vector3.new(0, 3, 0)
+        local dist = (tPos - myPos).Magnitude
+        if dist < 5 then break end
 
-        local currentPos = hrp.Position
-        local direction = (targetPos - currentPos).Unit
-        local chunkTarget = currentPos + direction * chunkDist
-        if i == chunks then chunkTarget = targetPos end
+        local chunkMove = math.min(dist, State.ChunkSize)
+        local direction = (tPos - myPos).Unit
+        local chunkTarget = myPos + direction * chunkMove
+        local duration = chunkMove / State.ChaseSpeed
 
-        local dist = (chunkTarget - currentPos).Magnitude
-        if dist < 0.5 then break end
-
-        local duration = dist / speed
         local tween = TweenService:Create(
             hrp,
             TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
-            {CFrame = CFrame.new(chunkTarget, chunkTarget + hrp.CFrame.LookVector * 5)}
+            {CFrame = CFrame.new(chunkTarget, chunkTarget + direction * 5)}
         )
         tween:Play()
 
@@ -101,11 +93,18 @@ local function tweenHRPTo(targetPos, speed)
         local timeout = tick() + duration + 1
         while not done and tick() < timeout do
             task.wait(0.01)
-            if not State.TPChase then tween:Cancel(); conn:Disconnect(); break end
+            if not State.TPChase or State.Target ~= plr then
+                tween:Cancel()
+                conn:Disconnect()
+                if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
+                return
+            end
         end
 
-        if State.TPChase then task.wait(State.ChunkWait) end
+        task.wait(State.ChunkWait)
     end
+
+    if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
 end
 
 -- ============================================
@@ -179,7 +178,7 @@ local function autoM1()
 end
 
 -- ============================================
--- TARGET LIST (sorted by distance)
+-- TARGET LIST
 -- ============================================
 local function rebuildTargetList()
     local hrp = getHRP()
@@ -199,8 +198,6 @@ local function rebuildTargetList()
         table.sort(list, function(a, b) return a.Distance < b.Distance end)
     end
     State.TargetList = list
-
-    -- keep index in range
     if #list == 0 then
         State.TargetIndex = 1
         State.Target = nil
@@ -221,16 +218,13 @@ end
 -- MAIN LOOP
 -- ============================================
 local lastAttack = 0
-local tpRunning = false
 local lastListRebuild = 0
 
 RunService.Heartbeat:Connect(function()
-    -- rebuild list periodically (every 1s) so distance stays fresh
     if tick() - lastListRebuild > 1 then
         lastListRebuild = tick()
         local prevTarget = State.Target
         rebuildTargetList()
-        -- keep previous target if still valid
         if prevTarget then
             for i, entry in ipairs(State.TargetList) do
                 if entry.Player == prevTarget then
@@ -243,12 +237,13 @@ RunService.Heartbeat:Connect(function()
     end
 
     -- TP chase
-    if State.TPChase and not tpRunning and State.Target then
-        local tHRP = State.Target.Character and State.Target.Character:FindFirstChild("HumanoidRootPart")
-        if tHRP then
+    if State.TPChase and not tpRunning then
+        local t = State.Target
+        local tHum = t and t.Character and t.Character:FindFirstChildOfClass("Humanoid")
+        if t and tHum and tHum.Health > 0 then
             tpRunning = true
             task.spawn(function()
-                tweenHRPTo(tHRP.Position - Vector3.new(0, 3, 0), State.ChaseSpeed)
+                chaseLoop(t)
                 tpRunning = false
             end)
         end
@@ -268,7 +263,7 @@ end)
 -- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV3"
+ui.Name = "ExtractV4"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
@@ -286,14 +281,13 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v3"
+title.Text = "Extract v4"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
 title.Parent = frame
 Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
 
--- Target info box
 local targetBox = Instance.new("Frame")
 targetBox.Size = UDim2.new(1, -20, 0, 50)
 targetBox.Position = UDim2.new(0, 10, 0, 35)
@@ -324,7 +318,6 @@ targetId.TextSize = 11
 targetId.TextXAlignment = Enum.TextXAlignment.Left
 targetId.Parent = targetBox
 
--- self-contained toggle
 local function makeToggle(textOff, textOn, y, colorOff, colorOn, initialState, onChanged)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, -20, 0, 28)
@@ -353,9 +346,7 @@ end
 
 makeToggle(
     "TP Chase: OFF", "TP Chase: ON",
-    95,
-    Color3.fromRGB(80, 80, 80), Color3.fromRGB(70, 140, 220),
-    false,
+    95, Color3.fromRGB(80, 80, 80), Color3.fromRGB(70, 140, 220), false,
     function(v)
         State.TPChase = v
         if not v then
@@ -365,7 +356,6 @@ makeToggle(
     end
 )
 
--- Next Target button
 local nextBtn = Instance.new("TextButton")
 nextBtn.Size = UDim2.new(1, -20, 0, 28)
 nextBtn.Position = UDim2.new(0, 10, 0, 130)
@@ -377,20 +367,14 @@ nextBtn.Font = Enum.Font.GothamBold
 nextBtn.TextSize = 12
 nextBtn.Parent = frame
 Instance.new("UICorner", nextBtn).CornerRadius = UDim.new(0, 5)
-nextBtn.MouseButton1Click:Connect(function()
-    cycleTarget()
-end)
+nextBtn.MouseButton1Click:Connect(function() cycleTarget() end)
 
--- Auto M1 toggle
 makeToggle(
     "Auto M1: OFF", "Auto M1: ON",
-    165,
-    Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 80, 80),
-    false,
+    165, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 80, 80), false,
     function(v) State.AutoM1 = v end
 )
 
--- Remove Lava button
 local lavaBtn = Instance.new("TextButton")
 lavaBtn.Size = UDim2.new(1, -20, 0, 28)
 lavaBtn.Position = UDim2.new(0, 10, 0, 200)
@@ -409,7 +393,6 @@ lavaBtn.MouseButton1Click:Connect(function()
     lavaBtn.Text = "Remove Lava"
 end)
 
--- Target info updater
 task.spawn(function()
     while task.wait(0.2) do
         local t = State.Target
@@ -426,4 +409,4 @@ task.spawn(function()
     end
 end)
 
-print("[Extract v3] Loaded. ChaseSpeed=220. Target display + Next button added.")
+print("[Extract v4] Loaded. per-chunk target tracking. speed=800.")
