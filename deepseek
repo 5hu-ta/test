@@ -1,785 +1,604 @@
 --[[
-    AutoBounty Framework
-    Target: Delta / Xeno / Real / Wave / Solara (UNC-compatible executors)
-    Game:   Blox Fruits (default config) — swap CONFIG for other games
-    Author: P
+    AutoBounty + Player ESP
+    Target: Delta / Xeno
+    Game:   Blox Fruits
     
-    Usage:
-        loadstring(game:HttpGet("https://your.host/AutoBounty.lua"))()
-    Or paste into executor and execute.
+    ESP fields:
+      - UserId (ID)
+      - Health / MaxHealth
+      - Bounty (Data.Bounty.Value, fallback attribute)
+      - Level  (Data.Level.Value)
+      - PvP    (PvpDisabled attribute: false = ON, true = OFF, nil = ?)
+    
+    Target selection: nearest-first (distance ascending)
+    Notification: none
 ]]
 
--- ============================================================
--- 0. EXECUTOR COMPATIBILITY LAYER
--- ============================================================
--- Xeno: getconnections often fails, hookfunction unreliable.
--- Delta/Real: mostly full UNC. We feature-detect and degrade.
--- ============================================================
-
-local ENV = getgenv()
-
-local function has(fn)
-    return type(rawget(ENV, fn)) == "function" or type(rawget(_G, fn)) == "function"
-end
-
-local COMPAT = {
-    hookmetamethod  = has("hookmetamethod") or has("hookfunction"),
-    getrawmetatable = has("getrawmetatable"),
-    setreadonly     = has("setreadonly"),
-    checkcaller     = has("checkcaller") or function() return false end,
-    getnamecallmethod = has("getnamecallmethod"),
-    Drawing         = has("Drawing") or (typeof(Drawing) == "table" and Drawing.new ~= nil),
-    is_synapse       = has("syn") or has("is_sirhurt_closure"),
-}
-
-local function compat_warn(msg)
-    warn("[AutoBounty][COMPAT] " .. msg)
-end
-
-if not COMPAT.Drawing then
-    compat_warn("Drawing library not found. ESP disabled.")
-end
-
--- ============================================================
--- 1. CONFIG — ここをゲームに合わせて書き換える
--- ============================================================
-
-local CONFIG = {
-    -- ターゲット検出
-    Target = {
-        MaxDistance     = 3000,       -- studs
-        MinHealthPct    = 0.15,       -- 15%以下は無視（キル不能/既にデッド扱い）
-        MaxHealthPct    = 1.0,
-        PreferLowHP     = true,       -- HPが低い敵を優先
-        IgnoreTeams     = true,       -- 同チームは無視
-        IgnoreFriends   = true,       -- フレンドは無視
-        ScanInterval    = 0.15,       -- 秒
-    },
-
-    -- 自動実行
-    Auto = {
-        Enabled         = false,
-        AttackRange     = 80,         -- この距離以内でスキル発動
-        ChaseEnabled    = true,       -- ターゲットに接近
-        ChaseSpeed      = 60,         -- Humanoid.WalkSpeed 書き換え
-        SkillDelay      = 0.35,       -- スキル間の遅延
-        Combo = {                     -- 実行するスキル（順番）
-            { key = "Z", hold = 0.08 },
-            { key = "X", hold = 0.08 },
-            { key = "C", hold = 0.08 },
-            { key = "V", hold = 0.08 },
-        },
-        UseWeaponSwap   = false,      -- 武器切り替え（ゲーム依存）
-    },
-
-    -- ESP
-    ESP = {
-        Enabled         = true,
-        Box             = true,
-        Name            = true,
-        Health          = true,
-        Distance        = true,
-        Tracer          = false,
-        Color           = Color3.fromRGB(255, 60, 60),
-        TeamColor       = true,
-        MaxDistance     = 3000,
-    },
-
-    -- リモートフック（自動バウンティ用）
-    Remote = {
-        Enabled         = false,
-        -- ここにゲームのバウンティ受注リモートを書く
-        -- 例: BountyRemote = ReplicatedStorage.Remotes.BountyClaim
-        ClaimRemoteName = nil,        -- nil なら自動検出を試みる
-        AutoClaim       = true,       -- キル後に自動で報酬受取
-    },
-
-    -- UI
-    UI = {
-        ToggleKey       = Enum.KeyCode.RightShift,
-        ShowConsole     = false,
-    },
-}
-
--- ============================================================
--- 2. SERVICES / HELPERS
--- ============================================================
-
+-- ============================================
+-- SERVICES
+-- ============================================
 local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService      = game:GetService("TweenService")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace         = game:GetService("Workspace")
+local LP                = Players.LocalPlayer
 
-local LocalPlayer = Players.LocalPlayer
-local Camera      = Workspace.CurrentCamera
+-- ============================================
+-- CONFIG
+-- ============================================
+local CONFIG = {
+    Enabled         = false,
+    ChaseEnabled    = true,
+    ChaseSpeed      = 300,
+    AttackRange     = 60,
+    BuddhaRange     = 1000,
+    AttackInterval  = 0.1,
+    ScanInterval    = 0.1,
+    TeamCheck       = true,
+    RequirePvP      = true,
+    ToggleKey       = Enum.KeyCode.F1,
 
-local function getCharacter(plr)
-    return plr and plr.Character
+    ESP = {
+        Enabled     = true,
+        UpdateRate  = 0.2,      -- seconds
+        MaxDistance = 3000,
+        ShowSelf    = false,    -- show ESP on yourself? normally no
+    },
+}
+
+-- ============================================
+-- HELPERS
+-- ============================================
+local function getChar(plr) return plr and plr.Character end
+local function getHRP(char)  return char and char:FindFirstChild("HumanoidRootPart") end
+local function getHum(char)  return char and char:FindFirstChild("Humanoid") end
+local function getHead(char) return char and char:FindFirstChild("Head") end
+
+-- ============================================
+-- PLAYER DATA ACCESSORS (Blox Fruits)
+-- ============================================
+local function getBounty(plr)
+    local data = plr:FindFirstChild("Data")
+    if data then
+        local bounty = data:FindFirstChild("Bounty")
+        if bounty and bounty:IsA("ValueBase") or bounty:IsA("IntValue") then
+            return bounty.Value
+        end
+    end
+    local attr = plr:GetAttribute("Bounty")
+    if attr then return attr end
+    return nil
 end
 
-local function getHumanoid(char)
-    return char and char:FindFirstChildOfClass("Humanoid")
+local function getLevel(plr)
+    local data = plr:FindFirstChild("Data")
+    if data then
+        local level = data:FindFirstChild("Level")
+        if level then return level.Value end
+    end
+    local attr = plr:GetAttribute("Level")
+    if attr then return attr end
+    return nil
 end
 
-local function getRoot(char)
-    return char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso"))
+local function getPvPState(plr)
+    local disabled = plr:GetAttribute("PvpDisabled")
+    if disabled == false then return "ON" end
+    if disabled == true  then return "OFF" end
+    return "?"
 end
 
-local function getHead(char)
-    return char and char:FindFirstChild("Head")
+-- ============================================
+-- SAFEZONE CHECK
+-- ============================================
+local function inSafezone(char)
+    local hrp = getHRP(char)
+    if not hrp then return true end
+    local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
+    if not worldOrigin then return false end
+    local safezones = worldOrigin:FindFirstChild("SafeZones")
+    if not safezones then return false end
+    for _, zone in ipairs(safezones:GetChildren()) do
+        local mesh = zone:FindFirstChild("Mesh")
+        if mesh then
+            local radius = zone.Size.X * mesh.Scale.X / 2
+            if (hrp.Position - zone.Position).Magnitude <= radius then
+                return true
+            end
+        end
+    end
+    return false
 end
 
-local function getRigType(humanoid)
-    -- R6: Torso 存在 / R15: UpperTorso 存在
-    local char = humanoid and humanoid.Parent
-    if not char then return "R15" end
-    return char:FindFirstChild("Torso") and "R6" or "R15"
+-- ============================================
+-- TARGET VIABILITY
+-- ============================================
+local function isBountyTarget(plr)
+    if plr == LP then return false end
+    local char = getChar(plr)
+    local hum  = getHum(char)
+    if not (char and hum and hum.Health > 0) then return false end
+    if inSafezone(char) then return false end
+    if CONFIG.TeamCheck and LP.Team and plr.Team == LP.Team then return false end
+    if CONFIG.RequirePvP then
+        local pvpDisabled = plr:GetAttribute("PvpDisabled")
+        if pvpDisabled ~= false then return false end
+    end
+    return true
 end
 
-local function worldToViewport(pos)
-    local screen, onScreen = Camera:WorldToViewportPoint(pos)
-    return Vector2.new(screen.X, screen.Y), onScreen, screen.Z
+-- ============================================
+-- TARGET SCANNER (nearest-first)
+-- ============================================
+local currentTarget = nil
+local lastScan = 0
+
+local function scanTarget()
+    if tick() - lastScan < CONFIG.ScanInterval then return end
+    lastScan = tick()
+
+    local myHRP = getHRP(getChar(LP))
+    if not myHRP then currentTarget = nil; return end
+
+    local best, bestDist = nil, math.huge
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if isBountyTarget(plr) then
+            local hrp = getHRP(plr.Character)
+            if hrp then
+                local d = (hrp.Position - myHRP.Position).Magnitude
+                if d < bestDist then
+                    best, bestDist = plr, d
+                end
+            end
+        end
+    end
+    currentTarget = best
 end
 
-local function distance(a, b)
-    return (a - b).Magnitude
+-- ============================================
+-- TWEEN TP CHASE
+-- ============================================
+local ghostPart = nil
+local currentTween = nil
+
+local function ensureGhost()
+    if ghostPart and ghostPart.Parent then return end
+    ghostPart = Instance.new("Part")
+    ghostPart.Size = Vector3.new(4, 1, 4)
+    ghostPart.Anchored = true
+    ghostPart.CanCollide = false
+    ghostPart.Transparency = 1
+    ghostPart.Parent = workspace
+    local myHRP = getHRP(getChar(LP))
+    if myHRP then
+        ghostPart.Position = myHRP.Position - Vector3.new(0, 2.5, 0)
+    end
 end
 
--- ============================================================
--- 3. TARGET MANAGER
--- ============================================================
+local function tweenTP(targetPos)
+    local myHRP = getHRP(getChar(LP))
+    if not myHRP then return end
 
-local TargetManager = {}
-TargetManager.__index = TargetManager
+    ensureGhost()
+    if not ghostPart or not ghostPart.Parent then return end
 
-function TargetManager.new()
-    local self = setmetatable({}, TargetManager)
-    self.current = nil
-    self.lastScan = 0
-    self.candidates = {}
-    return self
+    if currentTween then
+        currentTween:Cancel()
+        currentTween = nil
+    end
+
+    local dist = (targetPos - ghostPart.Position).Magnitude
+    if dist < 1 then return end
+
+    local duration = dist / CONFIG.ChaseSpeed
+    currentTween = TweenService:Create(
+        ghostPart,
+        TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+        { Position = targetPos }
+    )
+    local lookAt = targetPos + Vector3.new(0, 3, 0)
+    local newPos = ghostPart.Position + Vector3.new(0, 2.5, 0)
+    myHRP.CFrame = CFrame.lookAt(newPos, lookAt)
+    currentTween:Play()
 end
 
-local function isSameTeam(plr)
-    if not CONFIG.Target.IgnoreTeams then return false end
-    return plr.Team ~= nil and LocalPlayer.Team ~= nil and plr.Team == LocalPlayer.Team
+-- ============================================
+-- FAST ATTACK
+-- ============================================
+local function getEquippedTool()
+    local char = getChar(LP)
+    if not char then return nil end
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("Tool") then return child end
+    end
+    return nil
 end
 
-local function isFriend(plr)
-    if not CONFIG.Target.IgnoreFriends then return false end
-    local ok, result = pcall(function()
-        return LocalPlayer:IsFriendsWith(plr.UserId)
-    end)
-    return ok and result
+local function getAttackRange()
+    local myHRP = getHRP(getChar(LP))
+    if not myHRP then return CONFIG.AttackRange end
+    if myHRP:FindFirstChild("Buddha") then
+        return CONFIG.BuddhaRange
+    end
+    return CONFIG.AttackRange
 end
 
-function TargetManager:scan()
-    local now = tick()
-    if now - self.lastScan < CONFIG.Target.ScanInterval then
+local function fastAttack()
+    local myChar = getChar(LP)
+    local myHRP  = getHRP(myChar)
+    if not myHRP then return end
+
+    local tool = getEquippedTool()
+    if not tool then return end
+
+    local range = getAttackRange()
+
+    local hitList = {}
+    local firstHead = nil
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local char = getChar(plr)
+            local hum  = getHum(char)
+            local hrp  = getHRP(char)
+            local head = getHead(char)
+            if char and hum and hrp and head and hum.Health > 0 then
+                if (hrp.Position - myHRP.Position).Magnitude <= range then
+                    table.insert(hitList, {char, head})
+                    if not firstHead then firstHead = head end
+                end
+            end
+        end
+    end
+
+    if not firstHead then return end
+
+    if tool:FindFirstChild("LeftClickRemote") then
+        local idx = 1
+        for _, entry in ipairs(hitList) do
+            local char = entry[1]
+            local hrp = getHRP(char)
+            if hrp then
+                local dir = (hrp.Position - myHRP.Position).Unit
+                pcall(function()
+                    tool.LeftClickRemote:FireServer(dir, idx)
+                end)
+                idx = idx + 1
+            end
+        end
         return
     end
-    self.lastScan = now
-    self.candidates = {}
 
-    local myChar = getCharacter(LocalPlayer)
-    local myRoot = getRoot(myChar)
-    if not myRoot then return end
+    local modules = ReplicatedStorage:FindFirstChild("Modules")
+    local net = modules and modules:FindFirstChild("Net")
+    if not net then return end
 
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr == LocalPlayer then continue end
-        if isSameTeam(plr) or isFriend(plr) then continue end
+    local regAttack = net:FindFirstChild("RE/RegisterAttack")
+    local regHit    = net:FindFirstChild("RE/RegisterHit")
+    if not (regAttack and regHit) then return end
 
-        local char = getCharacter(plr)
-        local hum  = getHumanoid(char)
-        local root = getRoot(char)
-
-        if not (char and hum and root and hum.Health > 0) then continue end
-
-        local hpPct = hum.Health / math.max(hum.MaxHealth, 1)
-        if hpPct < CONFIG.Target.MinHealthPct or hpPct > CONFIG.Target.MaxHealthPct then
-            continue
-        end
-
-        local dist = distance(myRoot.Position, root.Position)
-        if dist > CONFIG.Target.MaxDistance then continue end
-
-        table.insert(self.candidates, {
-            Player   = plr,
-            Character= char,
-            Humanoid = hum,
-            Root     = root,
-            Head     = getHead(char),
-            Distance = dist,
-            HealthPct= hpPct,
-            RigType  = getRigType(hum),
-        })
-    end
-
-    -- sort
-    table.sort(self.candidates, function(a, b)
-        if CONFIG.Target.PreferLowHP and math.abs(a.HealthPct - b.HealthPct) > 0.1 then
-            return a.HealthPct < b.HealthPct
-        end
-        return a.Distance < b.Distance
+    pcall(function()
+        regAttack:FireServer(0.1)
+        regHit:FireServer(firstHead, hitList)
     end)
-
-    self.current = self.candidates[1]
 end
 
-function TargetManager:getTarget()
-    return self.current
+-- ============================================
+-- ESP MODULE
+-- ============================================
+local ESP = {
+    enabled = CONFIG.ESP.Enabled,
+    cache   = {},   -- [player] = BillboardGui
+}
+
+local function fmtNum(n)
+    if not n then return "?" end
+    if n >= 1e6 then return string.format("%.1fM", n / 1e6) end
+    if n >= 1e3 then return string.format("%.1fK", n / 1e3) end
+    return tostring(n)
 end
 
--- ============================================================
--- 4. ESP
--- ============================================================
+local function buildESPText(plr, hum, myHRP, tHRP)
+    local bounty = getBounty(plr)
+    local level  = getLevel(plr)
+    local pvp    = getPvPState(plr)
 
-local ESP = {}
-ESP.__index = ESP
+    local hp  = math.floor(hum.Health)
+    local max = math.floor(hum.MaxHealth)
+    local dist = math.floor((myHRP.Position - tHRP.Position).Magnitude)
 
-function ESP.new()
-    local self = setmetatable({}, ESP)
-    self.objects = {}   -- [player] = { Box, Name, Health, Distance, Tracer }
-    self.enabled = CONFIG.ESP.Enabled
-    self.conn = nil
-    return self
+    local pvpColor = (pvp == "ON") and "rgb(255,80,80)"
+                  or (pvp == "OFF") and "rgb(120,120,120)"
+                  or "rgb(180,180,180)"
+
+    return string.format(
+        "<b>%s</b>  <font color='rgb(180,180,180)'>[%d]</font>\n" ..
+        "<font color='rgb(255,220,120)'>HP %d/%d</font>  " ..
+        "<font color='rgb(120,220,120)'>Lv %s</font>\n" ..
+        "<font color='rgb(200,160,255)'>B %s</font>  " ..
+        "<font color='%s'>PvP %s</font>  " ..
+        "<font color='rgb(150,200,255)'>%dm</font>",
+        plr.Name,
+        plr.UserId,
+        hp, max,
+        level and tostring(level) or "?",
+        fmtNum(bounty),
+        pvpColor, pvp,
+        dist
+    )
 end
 
-local function newDrawing(kind)
-    if not COMPAT.Drawing then return nil end
-    local ok, obj = pcall(Drawing.new, kind)
-    return ok and obj or nil
+local function createESP(plr)
+    local char = getChar(plr)
+    local head = getHead(char)
+    if not head then return nil end
+
+    local old = ESP.cache[plr]
+    if old then old:Destroy() end
+
+    local bg = Instance.new("BillboardGui")
+    bg.Name = "AutoBountyESP"
+    bg.Size = UDim2.new(0, 220, 0, 70)
+    bg.StudsOffset = Vector3.new(0, 3, 0)
+    bg.AlwaysOnTop = true
+    bg.Adornee = head
+    bg.Parent = head
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Info"
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextStrokeTransparency = 0.6
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Top
+    label.RichText = true
+    label.TextWrapped = true
+    label.Parent = bg
+
+    ESP.cache[plr] = bg
+    return bg
 end
 
-function ESP:create(player)
-    if not COMPAT.Drawing then return nil end
-
-    local obj = {
-        Box      = newDrawing("Square"),
-        Name     = newDrawing("Text"),
-        Health   = newDrawing("Square"),
-        Distance = newDrawing("Text"),
-        Tracer   = newDrawing("Line"),
-    }
-
-    if obj.Box then
-        obj.Box.Thickness = 1
-        obj.Box.Filled = false
+local function destroyESP(plr)
+    local bg = ESP.cache[plr]
+    if bg then
+        bg:Destroy()
+        ESP.cache[plr] = nil
     end
-    if obj.Health then
-        obj.Health.Filled = true
-        obj.Health.Thickness = 1
-    end
-    if obj.Name then
-        obj.Name.Size = 14
-        obj.Name.Center = true
-        obj.Name.Outline = true
-    end
-    if obj.Distance then
-        obj.Distance.Size = 12
-        obj.Distance.Center = true
-        obj.Distance.Outline = true
-    end
-    if obj.Tracer then
-        obj.Tracer.Thickness = 1
-    end
-
-    self.objects[player] = obj
-    return obj
 end
 
-function ESP:destroy(player)
-    local obj = self.objects[player]
-    if not obj then return end
-    for _, d in pairs(obj) do
-        if d and d.Destroy then pcall(d.Destroy, d) end
+local function updateESP()
+    if not ESP.enabled then
+        for plr in pairs(ESP.cache) do destroyESP(plr) end
+        return
     end
-    self.objects[player] = nil
-end
 
-function ESP:update()
-    if not self.enabled or not COMPAT.Drawing then return end
-
-    local myChar = getCharacter(LocalPlayer)
-    local myRoot = getRoot(myChar)
-    if not myRoot then return end
-    local myPos = myRoot.Position
+    local myChar = getChar(LP)
+    local myHRP  = getHRP(myChar)
+    if not myHRP then return end
 
     local seen = {}
 
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr == LocalPlayer then continue end
-        local char = getCharacter(plr)
-        local hum  = getHumanoid(char)
-        local root = getRoot(char)
-        local head = getHead(char)
-
-        if not (char and hum and root and hum.Health > 0) then
-            if self.objects[plr] then self:destroy(plr) end
+        if plr == LP and not CONFIG.ESP.ShowSelf then
+            destroyESP(plr)
             continue
         end
 
-        local dist = distance(myPos, root.Position)
+        local char = getChar(plr)
+        local hum  = getHum(char)
+        local head = getHead(char)
+        local tHRP = getHRP(char)
+
+        if not (char and hum and head and tHRP and hum.Health > 0) then
+            destroyESP(plr)
+            continue
+        end
+
+        local dist = (myHRP.Position - tHRP.Position).Magnitude
         if dist > CONFIG.ESP.MaxDistance then
-            if self.objects[plr] then self:destroy(plr) end
+            destroyESP(plr)
             continue
         end
 
         seen[plr] = true
-        local obj = self.objects[plr] or self:create(plr)
-        if not obj then continue end
 
-        -- color
-        local color = CONFIG.ESP.Color
-        if CONFIG.ESP.TeamColor and plr.Team then
-            color = plr.Team.TeamColor.Color
+        local bg = ESP.cache[plr]
+        if not bg or not bg.Parent then
+            bg = createESP(plr)
         end
-
-        -- 3D box corners → viewport
-        local size = root.Size
-        local topPos = root.Position + Vector3.new(0, size.Y / 2 + 0.5, 0)
-        local botPos = root.Position - Vector3.new(0, size.Y / 2, 0)
-
-        local topScr, topOn = worldToViewport(topPos)
-        local botScr, botOn = worldToViewport(botPos)
-
-        if not (topOn and botOn) then
-            for _, d in pairs(obj) do if d then d.Visible = false end end
-            continue
-        end
-
-        local height = math.abs(botScr.Y - topScr.Y)
-        local width  = height * 0.6
-        local centerX = (topScr.X + botScr.X) / 2
-        local centerY = (topScr.Y + botScr.Y) / 2
-
-        -- BOX
-        if CONFIG.ESP.Box and obj.Box then
-            obj.Box.Visible = true
-            obj.Box.Color = color
-            obj.Box.Size = Vector2.new(width, height)
-            obj.Box.Position = Vector2.new(centerX - width / 2, topScr.Y)
-        end
-
-        -- NAME
-        if CONFIG.ESP.Name and obj.Name then
-            obj.Name.Visible = true
-            obj.Name.Color = color
-            obj.Name.Position = Vector2.new(centerX, topScr.Y - 18)
-            obj.Name.Text = plr.Name
-        end
-
-        -- HEALTH
-        if CONFIG.ESP.Health and obj.Health then
-            local hpPct = hum.Health / math.max(hum.MaxHealth, 1)
-            local barW = width
-            local barH = 4
-            obj.Health.Visible = true
-            obj.Health.Color = Color3.fromRGB(255, math.floor(255 * hpPct), 0)
-            obj.Health.Size = Vector2.new(barW * hpPct, barH)
-            obj.Health.Position = Vector2.new(centerX - barW / 2, botScr.Y + 2)
-        end
-
-        -- DISTANCE
-        if CONFIG.ESP.Distance and obj.Distance then
-            obj.Distance.Visible = true
-            obj.Distance.Color = Color3.fromRGB(220, 220, 220)
-            obj.Distance.Position = Vector2.new(centerX, botScr.Y + 8)
-            obj.Distance.Text = string.format("[%d]", math.floor(dist))
-        end
-
-        -- TRACER
-        if CONFIG.ESP.Tracer and obj.Tracer then
-            obj.Tracer.Visible = true
-            obj.Tracer.Color = color
-            obj.Tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
-            obj.Tracer.To = Vector2.new(centerX, botScr.Y)
-        end
-    end
-
-    -- cleanup
-    for plr, _ in pairs(self.objects) do
-        if not seen[plr] then self:destroy(plr) end
-    end
-end
-
-function ESP:setEnabled(bool)
-    self.enabled = bool
-    if not bool then
-        for plr, _ in pairs(self.objects) do self:destroy(plr) end
-    end
-end
-
--- ============================================================
--- 5. REMOTE HOOK / AUTO BOUNTY
--- ============================================================
-
-local RemoteHook = {}
-RemoteHook.__index = RemoteHook
-
-function RemoteHook.new()
-    local self = setmetatable({}, RemoteHook)
-    self.hooked = false
-    self.oldNamecall = nil
-    self.claimRemote = nil
-    return self
-end
-
-function RemoteHook:findClaimRemote()
-    -- 自動検出: 名前でそれっぽいリモートを探す
-    if not CONFIG.Remote.Enabled then return nil end
-    if CONFIG.Remote.ClaimRemoteName then
-        local found = ReplicatedStorage:FindFirstChild(CONFIG.Remote.ClaimRemoteName, true)
-        return found
-    end
-    -- fallback: Bounty / Reward / Claim を含む RemoteEvent
-    local function scan(parent)
-        for _, child in ipairs(parent:GetDescendants()) do
-            if child:IsA("RemoteEvent") then
-                local n = child.Name:lower()
-                if n:find("bounty") or n:find("claim") or n:find("reward") then
-                    return child
-                end
+        if bg then
+            bg.Adornee = head
+            local label = bg:FindFirstChild("Info")
+            if label then
+                label.Text = buildESPText(plr, hum, myHRP, tHRP)
             end
         end
     end
-    return scan(ReplicatedStorage) or scan(Workspace)
+
+    for plr in pairs(ESP.cache) do
+        if not seen[plr] then destroyESP(plr) end
+    end
 end
 
-function RemoteHook:install()
-    if self.hooked then return end
-    if not (COMPAT.getrawmetatable and COMPAT.hookmetamethod) then
-        compat_warn("Cannot hook __namecall (missing getrawmetatable/hookmetamethod). Remote features disabled.")
+-- ESP periodic updater (not every frame)
+local espAccum = 0
+RunService.Heartbeat:Connect(function(dt)
+    espAccum = espAccum + dt
+    if espAccum >= CONFIG.ESP.UpdateRate then
+        espAccum = 0
+        pcall(updateESP)
+    end
+end)
+
+-- ============================================
+-- MAIN COMBAT LOOP
+-- ============================================
+local lastAttack = 0
+
+RunService.Heartbeat:Connect(function()
+    if not CONFIG.Enabled then return end
+
+    scanTarget()
+    if not currentTarget then return end
+
+    if not isBountyTarget(currentTarget) then
+        currentTarget = nil
         return
     end
 
-    self.claimRemote = self:findClaimRemote()
-    if CONFIG.Remote.Enabled and not self.claimRemote then
-        compat_warn("Claim remote not found. Auto-claim disabled.")
-    end
-
-    local mt = getrawmetatable(game)
-    local old
-    old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-        local method = getnamecallmethod()
-
-        -- ここで発信リモートを監視
-        if method == "FireServer" and self:IsA("RemoteEvent") then
-            -- バウンティ受注/報酬受取の検出
-            if self == self.claimRemote then
-                -- フックしたリモートが発火されたらログ
-                if CONFIG.UI.ShowConsole then
-                    print("[AutoBounty] Claim remote fired:", self:GetFullName())
-                end
-            end
-        end
-
-        return old(self, ...)
-    end))
-
-    self.oldNamecall = old
-    self.hooked = true
-end
-
-function RemoteHook:tryClaim()
-    if not CONFIG.Remote.Enabled or not CONFIG.Remote.AutoClaim then return end
-    local remote = self.claimRemote
-    if not remote then return end
-    pcall(function()
-        remote:FireServer()
-    end)
-end
-
--- ============================================================
--- 6. AUTO EXECUTOR (chase + skill)
--- ============================================================
-
-local AutoExecutor = {}
-AutoExecutor.__index = AutoExecutor
-
-function AutoExecutor.new(targetMgr)
-    local self = setmetatable({}, AutoExecutor)
-    self.targetMgr = targetMgr
-    self.running = false
-    self.conn = nil
-    self.skillIndex = 1
-    self.lastSkill = 0
-    return self
-end
-
-local function isAlive(char)
-    local hum = getHumanoid(char)
-    return hum and hum.Health > 0
-end
-
-local function fireKey(key, holdTime)
-    -- エグゼキュータのキー入力API。Delta/Xeno/Real は syn 互換の virtualinput を持つことが多い
-    if typeof(key) == "string" then
-        key = Enum.KeyCode[key]
-    end
-    if key then
-        pcall(function()
-            if syn and syn.keypress then
-                syn.keypress(key)
-                task.wait(holdTime or 0.05)
-                syn.keyrelease(key)
-            elseif keypress then
-                keypress(key)
-                task.wait(holdTime or 0.05)
-                keyrelease(key)
-            else
-                -- fallback: VirtualInputManager
-                local vim = game:GetService("VirtualInputManager")
-                vim:SendKeyEvent(true, key, false, game)
-                task.wait(holdTime or 0.05)
-                vim:SendKeyEvent(false, key, false, game)
-            end
-        end)
-    end
-end
-
-function AutoExecutor:step()
-    if not self.running then return end
-
-    local target = self.targetMgr:getTarget()
-    if not target then return end
-
-    local myChar = getCharacter(LocalPlayer)
-    local myHum  = getHumanoid(myChar)
-    local myRoot = getRoot(myChar)
-    local tgtRoot = target.Root
-
-    if not (myHum and myRoot and tgtRoot and target.Humanoid.Health > 0) then
+    local tChar = getChar(currentTarget)
+    local tHRP  = getHRP(tChar)
+    local tHum  = getHum(tChar)
+    if not (tHRP and tHum and tHum.Health > 0) then
+        currentTarget = nil
         return
     end
 
-    local dist = distance(myRoot.Position, tgtRoot.Position)
+    local myHRP = getHRP(getChar(LP))
+    if not myHRP then return end
 
-    -- Chase
-    if CONFIG.Auto.ChaseEnabled and dist > CONFIG.Auto.AttackRange then
-        if myHum.WalkSpeed ~= CONFIG.Auto.ChaseSpeed then
-            myHum.WalkSpeed = CONFIG.Auto.ChaseSpeed
-        end
-        -- 直線移動（簡易）。ゲームによっては PathfindingService 推奨
-        local dir = (tgtRoot.Position - myRoot.Position).Unit
-        myRoot.CFrame = CFrame.lookAt(myRoot.Position, tgtRoot.Position)
-        myHum:Move(dir, false)
-    else
-        if myHum.WalkSpeed ~= 16 then
-            myHum.WalkSpeed = 16
-        end
-    end
+    local targetPos = tHRP.Position - Vector3.new(0, 3, 0)
+    local dist    = (myHRP.Position - targetPos).Magnitude
+    local range   = getAttackRange()
 
-    -- Skill combo
-    if dist <= CONFIG.Auto.AttackRange then
-        local now = tick()
-        if now - self.lastSkill >= CONFIG.Auto.SkillDelay then
-            local combo = CONFIG.Auto.Combo
-            if #combo > 0 then
-                local skill = combo[self.skillIndex]
-                fireKey(skill.key, skill.hold)
-                self.skillIndex = (self.skillIndex % #combo) + 1
-                self.lastSkill = now
-            end
-        end
-    end
-end
-
-function AutoExecutor:start()
-    if self.running then return end
-    self.running = true
-    self.conn = RunService.Heartbeat:Connect(function()
-        pcall(function() self:step() end)
-    end)
-end
-
-function AutoExecutor:stop()
-    self.running = false
-    if self.conn then
-        self.conn:Disconnect()
-        self.conn = nil
-    end
-    -- restore speed
-    local myHum = getHumanoid(getCharacter(LocalPlayer))
-    if myHum and myHum.WalkSpeed ~= 16 then
-        myHum.WalkSpeed = 16
-    end
-end
-
--- ============================================================
--- 7. UI (Rayfield if available, else minimal console)
--- ============================================================
-
-local UI = {}
-
-function UI.create(targetMgr, esp, autoExec, remoteHook)
-    -- Try Rayfield
-    local ok, Rayfield = pcall(function()
-        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-    end)
-
-    if ok and Rayfield then
-        local Window = Rayfield:CreateWindow({
-            Name = "AutoBounty — P",
-            LoadingTitle = "AutoBounty Framework",
-            LoadingSubtitle = "Delta / Xeno / Real compatible",
-            ConfigurationSaving = { Enabled = true, FolderName = "AutoBounty", FileName = "config" },
-            KeySystem = false,
-        })
-
-        local MainTab = Window:CreateTab("Main", nil)
-        local ESPTab  = Window:CreateTab("ESP", nil)
-        local RemTab  = Window:CreateTab("Remote", nil)
-
-        -- Main
-        MainTab:CreateToggle({
-            Name = "Auto Execute (Chase + Skills)",
-            CurrentValue = CONFIG.Auto.Enabled,
-            Flag = "AutoExec",
-            Callback = function(v)
-                CONFIG.Auto.Enabled = v
-                if v then autoExec:start() else autoExec:stop() end
-            end,
-        })
-        MainTab:CreateSlider({
-            Name = "Attack Range",
-            Range = { 20, 200 },
-            Increment = 5,
-            Suffix = " studs",
-            CurrentValue = CONFIG.Auto.AttackRange,
-            Flag = "AtkRange",
-            Callback = function(v) CONFIG.Auto.AttackRange = v end,
-        })
-        MainTab:CreateSlider({
-            Name = "Chase Speed",
-            Range = { 16, 200 },
-            Increment = 4,
-            CurrentValue = CONFIG.Auto.ChaseSpeed,
-            Flag = "ChaseSpd",
-            Callback = function(v) CONFIG.Auto.ChaseSpeed = v end,
-        })
-        MainTab:CreateToggle({
-            Name = "Prefer Low HP Target",
-            CurrentValue = CONFIG.Target.PreferLowHP,
-            Flag = "PreferHP",
-            Callback = function(v) CONFIG.Target.PreferLowHP = v end,
-        })
-
-        -- ESP
-        ESPTab:CreateToggle({
-            Name = "ESP Enabled",
-            CurrentValue = CONFIG.ESP.Enabled,
-            Flag = "ESP",
-            Callback = function(v)
-                CONFIG.ESP.Enabled = v
-                esp:setEnabled(v)
-            end,
-        })
-        ESPTab:CreateToggle({
-            Name = "Box",
-            CurrentValue = CONFIG.ESP.Box,
-            Flag = "ESPBox",
-            Callback = function(v) CONFIG.ESP.Box = v end,
-        })
-        ESPTab:CreateToggle({
-            Name = "Name",
-            CurrentValue = CONFIG.ESP.Name,
-            Flag = "ESPName",
-            Callback = function(v) CONFIG.ESP.Name = v end,
-        })
-        ESPTab:CreateToggle({
-            Name = "Health Bar",
-            CurrentValue = CONFIG.ESP.Health,
-            Flag = "ESPHealth",
-            Callback = function(v) CONFIG.ESP.Health = v end,
-        })
-        ESPTab:CreateToggle({
-            Name = "Distance",
-            CurrentValue = CONFIG.ESP.Distance,
-            Flag = "ESPDist",
-            Callback = function(v) CONFIG.ESP.Distance = v end,
-        })
-        ESPTab:CreateToggle({
-            Name = "Tracer",
-            CurrentValue = CONFIG.ESP.Tracer,
-            Flag = "ESPTracer",
-            Callback = function(v) CONFIG.ESP.Tracer = v end,
-        })
-
-        -- Remote
-        RemTab:CreateToggle({
-            Name = "Remote Hook (Claim)",
-            CurrentValue = CONFIG.Remote.Enabled,
-            Flag = "RemoteHook",
-            Callback = function(v)
-                CONFIG.Remote.Enabled = v
-                if v then remoteHook:install() end
-            end,
-        })
-        RemTab:CreateButton({
-            Name = "Manual Claim Now",
-            Callback = function()
-                remoteHook:tryClaim()
-            end,
-        })
-
-        Rayfield:Notify({
-            Title = "AutoBounty",
-            Content = "Loaded. RightShift to toggle UI.",
-            Duration = 4,
-        })
-
-        UserInputService.InputBegan:Connect(function(input, gpe)
-            if gpe then return end
-            if input.KeyCode == CONFIG.UI.ToggleKey then
-                Rayfield:Toggle()
-            end
-        end)
-
+    if CONFIG.ChaseEnabled and dist > range then
+        tweenTP(targetPos)
         return
     end
 
-    -- Fallback: minimal console UI
-    compat_warn("Rayfield unavailable. Using minimal console UI.")
-    print("[AutoBounty] Toggle key: RightShift | Auto: OFF | ESP: ON")
-    UserInputService.InputBegan:Connect(function(input, gpe)
-        if gpe then return end
-        if input.KeyCode == CONFIG.UI.ToggleKey then
-            CONFIG.Auto.Enabled = not CONFIG.Auto.Enabled
-            if CONFIG.Auto.Enabled then autoExec:start() else autoExec:stop() end
-            print("[AutoBounty] Auto Execute:", CONFIG.Auto.Enabled)
-        end
-    end)
+    if tick() - lastAttack >= CONFIG.AttackInterval then
+        fastAttack()
+        lastAttack = tick()
+    end
+end)
+
+-- ============================================
+-- UI
+-- ============================================
+local ui = Instance.new("ScreenGui")
+ui.Name = "AutoBountyUI"
+ui.ResetOnSpawn = false
+ui.Parent = LP:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 240, 0, 170)
+frame.Position = UDim2.new(0, 20, 0.5, -85)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = ui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+title.BorderSizePixel = 0
+title.Text = "AutoBounty"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.Parent = frame
+Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -20, 0, 20)
+statusLabel.Position = UDim2.new(0, 10, 0, 35)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Target: none"
+statusLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 12
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = frame
+
+-- ESP toggle
+local espBtn = Instance.new("TextButton")
+espBtn.Size = UDim2.new(1, -20, 0, 30)
+espBtn.Position = UDim2.new(0, 10, 0, 60)
+espBtn.BackgroundColor3 = Color3.fromRGB(70, 160, 100)
+espBtn.BorderSizePixel = 0
+espBtn.Text = "ESP: ON"
+espBtn.TextColor3 = Color3.new(1, 1, 1)
+espBtn.Font = Enum.Font.GothamBold
+espBtn.TextSize = 13
+espBtn.Parent = frame
+Instance.new("UICorner", espBtn).CornerRadius = UDim.new(0, 6)
+
+local function setESP(v)
+    ESP.enabled = v
+    CONFIG.ESP.Enabled = v
+    espBtn.Text = v and "ESP: ON" or "ESP: OFF"
+    espBtn.BackgroundColor3 = v
+        and Color3.fromRGB(70, 160, 100)
+        or  Color3.fromRGB(100, 100, 100)
+    if not v then
+        for plr in pairs(ESP.cache) do destroyESP(plr) end
+    end
+end
+espBtn.MouseButton1Click:Connect(function()
+    setESP(not ESP.enabled)
+end)
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(1, -20, 0, 35)
+toggleBtn.Position = UDim2.new(0, 10, 1, -45)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(70, 120, 220)
+toggleBtn.BorderSizePixel = 0
+toggleBtn.Text = "START"
+toggleBtn.TextColor3 = Color3.new(1, 1, 1)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 14
+toggleBtn.Parent = frame
+Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 6)
+
+local function setEnabled(v)
+    CONFIG.Enabled = v
+    toggleBtn.Text = v and "STOP" or "START"
+    toggleBtn.BackgroundColor3 = v
+        and Color3.fromRGB(220, 60, 60)
+        or  Color3.fromRGB(70, 120, 220)
 end
 
--- ============================================================
--- 8. MAIN LOOP
--- ============================================================
+toggleBtn.MouseButton1Click:Connect(function()
+    setEnabled(not CONFIG.Enabled)
+end)
 
-local targetMgr  = TargetManager.new()
-local esp        = ESP.new()
-local remoteHook = RemoteHook.new()
-local autoExec   = AutoExecutor.new(targetMgr)
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == CONFIG.ToggleKey then
+        setEnabled(not CONFIG.Enabled)
+    end
+end)
 
--- scan loop
+-- status updater
 task.spawn(function()
-    while task.wait(0.1) do
-        pcall(function() targetMgr:scan() end)
+    while task.wait(0.2) do
+        if not CONFIG.Enabled then
+            statusLabel.Text = "Target: none"
+        elseif currentTarget then
+            local myHRP = getHRP(getChar(LP))
+            local tHRP  = getHRP(getChar(currentTarget))
+            local d = 0
+            if myHRP and tHRP then
+                d = (tHRP.Position - myHRP.Position).Magnitude
+            end
+            statusLabel.Text = string.format("Target: %s [%d]", currentTarget.Name, math.floor(d))
+        else
+            statusLabel.Text = "Target: none"
+        end
     end
 end)
 
--- ESP loop
-RunService.RenderStepped:Connect(function()
-    pcall(function() esp:update() end)
+-- cleanup on respawn
+LP.CharacterAdded:Connect(function()
+    if ghostPart then ghostPart:Destroy(); ghostPart = nil end
+    if currentTween then currentTween:Cancel(); currentTween = nil end
+    for plr in pairs(ESP.cache) do destroyESP(plr) end
 end)
 
--- install remote hook if enabled
-if CONFIG.Remote.Enabled then
-    remoteHook:install()
-end
-
--- build UI
-UI.create(targetMgr, esp, autoExec, remoteHook)
-
-print("[AutoBounty] Loaded. Target:", CONFIG.Target.MaxDistance, "studs | ESP:", CONFIG.ESP.Enabled)
+print("[AutoBounty] Loaded. F1 toggle combat. ESP toggle in panel.")
