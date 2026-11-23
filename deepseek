@@ -96,10 +96,6 @@ local function chaseLoop(plr)
             orbitAngle = math.atan2(rel.Z, rel.X)
         end
 
-        if orbitActive and horizDist > State.OrbitRadius + 30 then
-            orbitActive = false
-        end
-
         if orbitActive then
             local dt = task.wait()
             orbitAngle = orbitAngle + State.OrbitSpeed * dt
