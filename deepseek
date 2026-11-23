@@ -39,7 +39,7 @@ local State = {
     OrbitRadius = 37.5,
     OrbitHeight = 16,
     OrbitSpeed = 10,
-    AttackRange = 60,
+    AttackRange = 80,
     BuddhaRange = 1000,
 }
 
