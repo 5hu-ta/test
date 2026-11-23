@@ -30,8 +30,8 @@ local State = {
     ChunkSize = 200,
     ChunkWait = 0.02,
     OrbitRadius = 15,
-    OrbitHeight = 10,
-    OrbitSpeed = 5,
+    OrbitHeight = 16,
+    OrbitSpeed = 10,
     AttackRange = 60,
     BuddhaRange = 1000,
 }
