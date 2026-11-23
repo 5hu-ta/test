@@ -1,9 +1,9 @@
 --[[
-    Blox Fruits — Extract v12
-    Changes from v11:
-      - Remove Lava runs automatically on load (button removed)
-      - Auto-join team configured via CONFIG.AutoJoinTeam (buttons removed)
-      - Player info panel: Name, UserId, Team, Level, Bounty, Ping, FPS
+    Blox Fruits — Extract v13
+    Changes from v12:
+      - Auto Ken / Buso / V3 / V4 are always-on (no toggles)
+      - Haki loop runs continuously on load
+      - UI section removed; frame shrinks
 ]]
 
 -- ============================================
@@ -18,7 +18,7 @@ local CONFIG = {
 -- SINGLE INSTANCE GUARD
 -- ============================================
 if getgenv().ExtractV6_Lock then
-    warn("[Extract v12] Already running. Click 'Unload' in the existing UI first.")
+    warn("[Extract v13] Already running. Click 'Unload' in the existing UI first.")
     return
 end
 getgenv().ExtractV6_Lock = true
@@ -37,10 +37,6 @@ local State = {
     Loaded = true,
     TPChase = false,
     AutoM1 = false,
-    AutoKen = false,
-    AutoBuso = false,
-    AutoV3 = false,
-    AutoV4 = false,
     Target = nil,
     TargetIndex = 1,
     TargetList = {},
@@ -133,7 +129,7 @@ task.spawn(function()
     for _ = 1, 5 do
         if not State.Loaded then return end
         if removeLava() then
-            print("[Extract v12] Lava removed.")
+            print("[Extract v13] Lava removed.")
             return
         end
         task.wait(2)
@@ -154,13 +150,13 @@ task.spawn(function()
             pcall(function() commF:InvokeServer("SetTeam", CONFIG.AutoJoinTeam) end)
             task.wait(0.3)
             if LP.Team then
-                print("[Extract v12] Auto-joined " .. CONFIG.AutoJoinTeam)
+                print("[Extract v13] Auto-joined " .. CONFIG.AutoJoinTeam)
                 return
             end
         end
         task.wait(2)
     end
-    warn("[Extract v12] Auto-join timed out.")
+    warn("[Extract v13] Auto-join timed out.")
 end)
 
 -- ============================================
@@ -253,7 +249,7 @@ task.spawn(function()
 end)
 
 -- ============================================
--- HAKI REMOTES LOOP
+-- HAKI / RACE LOOP (always-on)
 -- ============================================
 task.spawn(function()
     while State.Loaded do
@@ -262,11 +258,13 @@ task.spawn(function()
         if char then
             local commF, commE = getRemotes()
 
-            if State.AutoKen and commE then
+            -- Auto Ken
+            if commE then
                 pcall(function() commE:FireServer("Ken", true) end)
             end
 
-            if State.AutoBuso and commF then
+            -- Auto Buso
+            if commF then
                 pcall(function()
                     if not char:HasTag("Buso") then
                         commF:InvokeServer("BuyHaki", "Buso")
@@ -276,23 +274,23 @@ task.spawn(function()
                 end)
             end
 
-            if State.AutoV3 and commE then
+            -- Auto V3 (Agility)
+            if commE then
                 pcall(function() commE:FireServer("ActivateAbility") end)
             end
 
-            if State.AutoV4 then
-                pcall(function()
-                    local backpack = LP:FindFirstChild("Backpack")
-                    local awakening = backpack and backpack:FindFirstChild("Awakening")
-                    local energy = char:FindFirstChild("RaceEnergy")
-                    local transformed = char:FindFirstChild("RaceTransformed")
-                    if awakening and energy and transformed then
-                        if energy.Value >= 1 and not transformed.Value then
-                            awakening.RemoteFunction:InvokeServer({true})
-                        end
+            -- Auto V4 (Race transform)
+            pcall(function()
+                local backpack = LP:FindFirstChild("Backpack")
+                local awakening = backpack and backpack:FindFirstChild("Awakening")
+                local energy = char:FindFirstChild("RaceEnergy")
+                local transformed = char:FindFirstChild("RaceTransformed")
+                if awakening and energy and transformed then
+                    if energy.Value >= 1 and not transformed.Value then
+                        awakening.RemoteFunction:InvokeServer({true})
                     end
-                end)
-            end
+                end
+            end)
         end
         task.wait(0.5)
     end
@@ -619,13 +617,13 @@ end)
 -- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV12"
+ui.Name = "ExtractV13"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 470)
-frame.Position = UDim2.new(0, 20, 0.5, -235)
+frame.Size = UDim2.new(0, 240, 0, 320)
+frame.Position = UDim2.new(0, 20, 0.5, -160)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -637,7 +635,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v12"
+title.Text = "Extract v13"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -753,46 +751,10 @@ makeToggle(
     function(v) State.AutoM1 = v end
 )
 
--- Haki section
-local hakiLabel = Instance.new("TextLabel")
-hakiLabel.Size = UDim2.new(1, -20, 0, 20)
-hakiLabel.Position = UDim2.new(0, 10, 0, 275)
-hakiLabel.BackgroundTransparency = 1
-hakiLabel.Text = "— Haki / Race —"
-hakiLabel.TextColor3 = Color3.fromRGB(140, 140, 160)
-hakiLabel.Font = Enum.Font.GothamBold
-hakiLabel.TextSize = 11
-hakiLabel.TextXAlignment = Enum.TextXAlignment.Left
-hakiLabel.Parent = frame
-
-makeToggle(
-    "Auto Ken: OFF", "Auto Ken: ON",
-    295, Color3.fromRGB(80, 80, 80), Color3.fromRGB(140, 100, 220), false,
-    function(v) State.AutoKen = v end
-)
-
-makeToggle(
-    "Auto Buso: OFF", "Auto Buso: ON",
-    328, Color3.fromRGB(80, 80, 80), Color3.fromRGB(180, 100, 100), false,
-    function(v) State.AutoBuso = v end
-)
-
-makeToggle(
-    "Auto V3: OFF", "Auto V3: ON",
-    361, Color3.fromRGB(80, 80, 80), Color3.fromRGB(100, 180, 140), false,
-    function(v) State.AutoV3 = v end
-)
-
-makeToggle(
-    "Auto V4: OFF", "Auto V4: ON",
-    394, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 160, 60), false,
-    function(v) State.AutoV4 = v end
-)
-
 -- Unload
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 432)
+unloadBtn.Position = UDim2.new(0, 10, 0, 280)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 unloadBtn.BorderSizePixel = 0
 unloadBtn.Text = "Unload"
@@ -811,8 +773,8 @@ statusGui.ResetOnSpawn = false
 statusGui.Parent = LP:WaitForChild("PlayerGui")
 
 local statusFrame = Instance.new("Frame")
-statusFrame.Size = UDim2.new(0, 170, 0, 60)
-statusFrame.Position = UDim2.new(1, -180, 0, 10)
+statusFrame.Size = UDim2.new(0, 180, 0, 94)
+statusFrame.Position = UDim2.new(1, -190, 0, 10)
 statusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 statusFrame.BackgroundTransparency = 0.2
 statusFrame.BorderSizePixel = 0
@@ -823,7 +785,7 @@ local statusTitle = Instance.new("TextLabel")
 statusTitle.Size = UDim2.new(1, -10, 0, 18)
 statusTitle.Position = UDim2.new(0, 8, 0, 4)
 statusTitle.BackgroundTransparency = 1
-statusTitle.Text = "Status"
+statusTitle.Text = "Auto Working"
 statusTitle.TextColor3 = Color3.fromRGB(160, 160, 180)
 statusTitle.Font = Enum.Font.GothamBold
 statusTitle.TextSize = 11
@@ -846,14 +808,11 @@ end
 
 local nofogLine = makeStatusLine(24)
 local fpsLine   = makeStatusLine(42)
+local hakiLine  = makeStatusLine(60)
 
 unloadBtn.MouseButton1Click:Connect(function()
     State.TPChase = false
     State.AutoM1 = false
-    State.AutoKen = false
-    State.AutoBuso = false
-    State.AutoV3 = false
-    State.AutoV4 = false
     State.Loaded = false
     local hrp = getHRP()
     if hrp then hrp.Anchored = false end
@@ -861,7 +820,7 @@ unloadBtn.MouseButton1Click:Connect(function()
     if ui then ui:Destroy() end
     if statusGui then statusGui:Destroy() end
     getgenv().ExtractV6_Lock = false
-    print("[Extract v12] Unloaded.")
+    print("[Extract v13] Unloaded.")
 end)
 
 -- Status updater
@@ -885,6 +844,9 @@ task.spawn(function()
             fpsLine.Text = "… FPS Boost pending"
             fpsLine.TextColor3 = Color3.fromRGB(220, 180, 80)
         end
+
+        hakiLine.Text = "✓ Ken/Buso/V3/V4 running"
+        hakiLine.TextColor3 = Color3.fromRGB(100, 220, 140)
     end
 end)
 
@@ -928,4 +890,4 @@ task.spawn(function()
     end
 end)
 
-print("[Extract v12] Loaded. Auto team = " .. tostring(CONFIG.AutoJoinTeam))
+print("[Extract v13] Loaded. Haki/Race always-on.")
