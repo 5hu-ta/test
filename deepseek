@@ -1,14 +1,21 @@
 --[[
-    Blox Fruits — Extract v5
-    Features:
-      - TP Chase with per-chunk target recompute (no trail following)
-      - Orbit around target's top (dodge M1, stay in hit range)
-      - Auto M1
-      - Remove Lava
-      - Target info display (name + UserId + distance)
-      - Next Target button
-      - ChaseSpeed = 250
+    Blox Fruits — Extract v6
+    Changes from v5:
+      - Orbit center smoothed with lerp (fixes position desync)
+      - Per-frame delta cap (prevents huge jumps)
+      - Rubberband detection: auto-throttles orbit speed on server reset
+      - Single-instance lock via getgenv()
+      - Unload button to release lock
 ]]
+
+-- ============================================
+-- SINGLE INSTANCE GUARD
+-- ============================================
+if getgenv().ExtractV6_Lock then
+    warn("[Extract v6] Already running. Click 'Unload' in the existing UI first.")
+    return
+end
+getgenv().ExtractV6_Lock = true
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -66,7 +73,7 @@ local function removeLava()
 end
 
 -- ============================================
--- TP CHASE — per-chunk recompute + orbit
+-- TP CHASE — anti-rubberband orbit
 -- ============================================
 local tpRunning = false
 
@@ -76,6 +83,10 @@ local function chaseLoop(plr)
 
     local orbitAngle = 0
     local orbitActive = false
+    local smoothedCenter = nil
+    local lastSetPos = nil
+    local rubberbandHits = 0
+    local effectiveOrbitSpeed = State.OrbitSpeed
 
     while State.TPChase and State.Target == plr do
         local hrp = getHRP()
@@ -86,40 +97,71 @@ local function chaseLoop(plr)
 
         local tPos = tHRP.Position
         local myPos = hrp.Position
-        local center = tPos + Vector3.new(0, State.OrbitHeight, 0)
+        local targetCenter = tPos + Vector3.new(0, State.OrbitHeight, 0)
 
         local horizDist = (Vector3.new(tPos.X, myPos.Y, tPos.Z) - myPos).Magnitude
 
         if not orbitActive and horizDist < State.OrbitRadius + 10 then
             orbitActive = true
-            local rel = myPos - center
+            local rel = myPos - targetCenter
             orbitAngle = math.atan2(rel.Z, rel.X)
+            smoothedCenter = targetCenter
         end
 
         if orbitActive then
             local dt = task.wait()
-            orbitAngle = orbitAngle + State.OrbitSpeed * dt
+
+            -- hard snap if enemy teleported very far (portal, dash, X)
+            if smoothedCenter and (smoothedCenter - targetCenter).Magnitude > 60 then
+                smoothedCenter = targetCenter
+            end
+
+            -- lerp center to reduce jitter from physics noise
+            if not smoothedCenter then smoothedCenter = targetCenter end
+            smoothedCenter = smoothedCenter:Lerp(targetCenter, math.min(1, 15 * dt))
+
+            orbitAngle = orbitAngle + effectiveOrbitSpeed * dt
 
             local offset = Vector3.new(
                 math.cos(orbitAngle) * State.OrbitRadius,
                 0,
                 math.sin(orbitAngle) * State.OrbitRadius
             )
-            local newPos = center + offset
-            hrp.CFrame = CFrame.lookAt(
-                newPos,
-                Vector3.new(tPos.X, newPos.Y, tPos.Z)
-            )
+            local newPos = smoothedCenter + offset
+
+            -- per-frame delta cap
+            local moveDelta = (newPos - hrp.Position).Magnitude
+            if moveDelta > 8 then
+                newPos = hrp.Position + (newPos - hrp.Position).Unit * 8
+            end
+
+            hrp.CFrame = CFrame.lookAt(newPos, Vector3.new(tPos.X, newPos.Y, tPos.Z))
+
+            -- rubberband detection
+            if lastSetPos then
+                local mismatch = (hrp.Position - lastSetPos).Magnitude
+                if mismatch > 8 then
+                    rubberbandHits = rubberbandHits + 1
+                    if rubberbandHits >= 3 then
+                        effectiveOrbitSpeed = math.max(3, effectiveOrbitSpeed * 0.7)
+                        rubberbandHits = 0
+                    end
+                else
+                    rubberbandHits = math.max(0, rubberbandHits - 1)
+                    effectiveOrbitSpeed = math.min(State.OrbitSpeed, effectiveOrbitSpeed + 0.2)
+                end
+            end
+            lastSetPos = newPos
         else
-            local targetPoint = center
-            local dist = (targetPoint - myPos).Magnitude
+            local dist = (targetCenter - myPos).Magnitude
             if dist < 5 then
                 orbitActive = true
-                local rel = myPos - center
+                smoothedCenter = targetCenter
+                local rel = myPos - targetCenter
                 orbitAngle = math.atan2(rel.Z, rel.X)
             else
                 local chunkMove = math.min(dist, State.ChunkSize)
-                local direction = (targetPoint - myPos).Unit
+                local direction = (targetCenter - myPos).Unit
                 local chunkTarget = myPos + direction * chunkMove
                 local duration = chunkMove / State.ChaseSpeed
 
@@ -264,7 +306,7 @@ end
 local lastAttack = 0
 local lastListRebuild = 0
 
-RunService.Heartbeat:Connect(function()
+local heartbeatConn = RunService.Heartbeat:Connect(function()
     if tick() - lastListRebuild > 1 then
         lastListRebuild = tick()
         local prevTarget = State.Target
@@ -305,13 +347,13 @@ end)
 -- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV5"
+ui.Name = "ExtractV6"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 240)
-frame.Position = UDim2.new(0, 20, 0.5, -120)
+frame.Size = UDim2.new(0, 240, 0, 280)
+frame.Position = UDim2.new(0, 20, 0.5, -140)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -323,7 +365,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v5"
+title.Text = "Extract v6"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -435,8 +477,30 @@ lavaBtn.MouseButton1Click:Connect(function()
     lavaBtn.Text = "Remove Lava"
 end)
 
+-- Unload button
+local unloadBtn = Instance.new("TextButton")
+unloadBtn.Size = UDim2.new(1, -20, 0, 24)
+unloadBtn.Position = UDim2.new(0, 10, 0, 235)
+unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+unloadBtn.BorderSizePixel = 0
+unloadBtn.Text = "Unload"
+unloadBtn.TextColor3 = Color3.new(1, 1, 1)
+unloadBtn.Font = Enum.Font.GothamBold
+unloadBtn.TextSize = 11
+unloadBtn.Parent = frame
+Instance.new("UICorner", unloadBtn).CornerRadius = UDim.new(0, 5)
+unloadBtn.MouseButton1Click:Connect(function()
+    State.TPChase = false
+    State.AutoM1 = false
+    if heartbeatConn then heartbeatConn:Disconnect() end
+    if ui then ui:Destroy() end
+    getgenv().ExtractV6_Lock = false
+    print("[Extract v6] Unloaded.")
+end)
+
 task.spawn(function()
     while task.wait(0.2) do
+        if not ui.Parent then break end
         local t = State.Target
         if t and t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
             local hrp = getHRP()
@@ -451,4 +515,4 @@ task.spawn(function()
     end
 end)
 
-print("[Extract v5] Loaded. Orbit enabled. ChaseSpeed=250.")
+print("[Extract v6] Loaded. Single-instance locked. Unload to release.")
