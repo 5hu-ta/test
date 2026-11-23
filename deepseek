@@ -45,6 +45,7 @@ local State = {
     OrbitSpeed = 10,
     AttackRange = 150,
     BuddhaRange = 1000,
+    MaxTargetDistance = 75000,
 }
 
 -- ============================================
@@ -153,6 +154,7 @@ local function chaseLoop(plr)
 
         local tPos = tHRP.Position
         local myPos = hrp.Position
+        if (tPos - myPos).Magnitude > State.MaxTargetDistance then break end
         local targetCenter = tPos + Vector3.new(0, State.OrbitHeight, 0)
 
         local horizDist = (Vector3.new(tPos.X, myPos.Y, tPos.Z) - myPos).Magnitude
@@ -329,7 +331,9 @@ local function rebuildTargetList()
                 local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
                 if tHRP and tHum and tHum.Health > 0 then
                     local d = (tHRP.Position - hrp.Position).Magnitude
-                    table.insert(list, {Player = plr, Distance = d})
+                    if d <= State.MaxTargetDistance then
+                        table.insert(list, {Player = plr, Distance = d})
+                    end
                 end
             end
         end
