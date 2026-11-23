@@ -1,22 +1,24 @@
 --[[
-    Blox Fruits — Extract v14
-    New:
-      - Player ESP (headshot + name + level + distance + HP/EN bars, team color)
-      - Island ESP (name + distance)
+    Blox Fruits — Extract v13
+    Changes from v12:
+      - Auto Ken / Buso / V3 / V4 are always-on (no toggles)
+      - Haki loop runs continuously on load
+      - UI section removed; frame shrinks
 ]]
 
 -- ============================================
--- CONFIG
+-- CONFIG — 変更はここだけ
 -- ============================================
+-- 自動参加するチーム。 "Pirates" / "Marines" / nil (無効)
 local CONFIG = {
-    AutoJoinTeam = "Pirates",  -- "Pirates" / "Marines" / nil
+    AutoJoinTeam = "Pirates",
 }
 
 -- ============================================
 -- SINGLE INSTANCE GUARD
 -- ============================================
 if getgenv().ExtractV6_Lock then
-    warn("[Extract v14] Already running. Click 'Unload' in the existing UI first.")
+    warn("[Extract v13] Already running. Click 'Unload' in the existing UI first.")
     return
 end
 getgenv().ExtractV6_Lock = true
@@ -35,8 +37,6 @@ local State = {
     Loaded = true,
     TPChase = false,
     AutoM1 = false,
-    ESPPlayer = false,
-    ESPIsland = false,
     Target = nil,
     TargetIndex = 1,
     TargetList = {},
@@ -103,7 +103,7 @@ local function getTeamName()
 end
 
 -- ============================================
--- REMOVE LAVA
+-- REMOVE LAVA (auto on load)
 -- ============================================
 local function removeLava()
     local removed = false
@@ -129,7 +129,7 @@ task.spawn(function()
     for _ = 1, 5 do
         if not State.Loaded then return end
         if removeLava() then
-            print("[Extract v14] Lava removed.")
+            print("[Extract v13] Lava removed.")
             return
         end
         task.wait(2)
@@ -150,17 +150,17 @@ task.spawn(function()
             pcall(function() commF:InvokeServer("SetTeam", CONFIG.AutoJoinTeam) end)
             task.wait(0.3)
             if LP.Team then
-                print("[Extract v14] Auto-joined " .. CONFIG.AutoJoinTeam)
+                print("[Extract v13] Auto-joined " .. CONFIG.AutoJoinTeam)
                 return
             end
         end
         task.wait(2)
     end
-    warn("[Extract v14] Auto-join timed out.")
+    warn("[Extract v13] Auto-join timed out.")
 end)
 
 -- ============================================
--- NO FOG
+-- NO FOG (always-on)
 -- ============================================
 local function applyNoFog()
     local lighting = game:GetService("Lighting")
@@ -173,7 +173,7 @@ local function applyNoFog()
 end
 
 -- ============================================
--- FORCE FPS BOOST
+-- FORCE FPS BOOST (always-on, reapply 60s)
 -- ============================================
 local function forceFPSBoost()
     local lighting = game:GetService("Lighting")
@@ -249,7 +249,7 @@ task.spawn(function()
 end)
 
 -- ============================================
--- HAKI / RACE LOOP
+-- HAKI / RACE LOOP (always-on)
 -- ============================================
 task.spawn(function()
     while State.Loaded do
@@ -258,10 +258,12 @@ task.spawn(function()
         if char then
             local commF, commE = getRemotes()
 
+            -- Auto Ken
             if commE then
                 pcall(function() commE:FireServer("Ken", true) end)
             end
 
+            -- Auto Buso
             if commF then
                 pcall(function()
                     if not char:HasTag("Buso") then
@@ -272,10 +274,12 @@ task.spawn(function()
                 end)
             end
 
+            -- Auto V3 (Agility)
             if commE then
                 pcall(function() commE:FireServer("ActivateAbility") end)
             end
 
+            -- Auto V4 (Race transform)
             pcall(function()
                 local backpack = LP:FindFirstChild("Backpack")
                 local awakening = backpack and backpack:FindFirstChild("Awakening")
@@ -289,240 +293,6 @@ task.spawn(function()
             end)
         end
         task.wait(0.5)
-    end
-end)
-
--- ============================================
--- ESP SYSTEM
--- ============================================
-local ESPCache = {}
-
-local function GetHeadshotUrl(userId)
-    return string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", userId)
-end
-
-local function AddESP(adornee, color, textFn, healthFn, imageFn, tag)
-    if not adornee or not adornee.Parent then return end
-    if ESPCache[adornee] then return end
-
-    local billboard = Instance.new("BillboardGui")
-    billboard.Name = "ESP_AutoBounty"
-    billboard.Size = UDim2.new(0, 220, 0, 56)
-    billboard.StudsOffset = Vector3.new(0, 3, 0)
-    billboard.AlwaysOnTop = true
-    billboard.LightInfluence = 0
-    billboard.MaxDistance = 5000
-    billboard.Adornee = adornee
-
-    local root = Instance.new("Frame")
-    root.Size = UDim2.new(1, 0, 1, 0)
-    root.BackgroundTransparency = 1
-    root.Parent = billboard
-
-    local hasImage = imageFn ~= nil
-    local hasHealth = healthFn ~= nil
-    local leftOffset = hasImage and 56 or 4
-
-    local image
-    if hasImage then
-        image = Instance.new("ImageLabel")
-        image.Size = UDim2.new(0, 50, 0, 50)
-        image.Position = UDim2.new(0, 0, 0, 0)
-        image.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
-        image.BackgroundTransparency = 0.2
-        image.Image = ""
-        image.Parent = root
-        Instance.new("UICorner", image).CornerRadius = UDim.new(0, 6)
-        local stroke = Instance.new("UIStroke", image)
-        stroke.Color = color
-        stroke.Thickness = 1.5
-        local ok, url = pcall(imageFn)
-        if ok and url then image.Image = url end
-    end
-
-    local text = Instance.new("TextLabel")
-    text.Size = UDim2.new(1, -leftOffset - 4, 0, 30)
-    text.Position = UDim2.new(0, leftOffset, 0, 0)
-    text.BackgroundTransparency = 1
-    text.RichText = true
-    text.TextXAlignment = Enum.TextXAlignment.Left
-    text.TextYAlignment = Enum.TextYAlignment.Top
-    text.Font = Enum.Font.GothamBold
-    text.TextSize = 13
-    text.TextColor3 = Color3.new(1, 1, 1)
-    text.TextStrokeTransparency = 0.4
-    text.TextStrokeColor3 = Color3.new(0, 0, 0)
-    text.Text = ""
-    text.Parent = root
-
-    local hpFill, enFill
-    if hasHealth then
-        local hpBg = Instance.new("Frame")
-        hpBg.Size = UDim2.new(1, -leftOffset - 4, 0, 5)
-        hpBg.Position = UDim2.new(0, leftOffset, 0, 32)
-        hpBg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        hpBg.BorderSizePixel = 0
-        hpBg.Parent = root
-        Instance.new("UICorner", hpBg).CornerRadius = UDim.new(1, 0)
-
-        hpFill = Instance.new("Frame")
-        hpFill.Size = UDim2.new(1, 0, 1, 0)
-        hpFill.BackgroundColor3 = color
-        hpFill.BorderSizePixel = 0
-        hpFill.Parent = hpBg
-        Instance.new("UICorner", hpFill).CornerRadius = UDim.new(1, 0)
-
-        local enBg = Instance.new("Frame")
-        enBg.Size = UDim2.new(1, -leftOffset - 4, 0, 4)
-        enBg.Position = UDim2.new(0, leftOffset, 0, 40)
-        enBg.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-        enBg.BorderSizePixel = 0
-        enBg.Parent = root
-        Instance.new("UICorner", enBg).CornerRadius = UDim.new(1, 0)
-
-        enFill = Instance.new("Frame")
-        enFill.Size = UDim2.new(1, 0, 1, 0)
-        enFill.BackgroundColor3 = Color3.fromRGB(70, 180, 255)
-        enFill.BorderSizePixel = 0
-        enFill.Parent = enBg
-        Instance.new("UICorner", enFill).CornerRadius = UDim.new(1, 0)
-    end
-
-    billboard.Parent = adornee
-
-    ESPCache[adornee] = {
-        Billboard = billboard,
-        Text = text,
-        HPFill = hpFill,
-        ENFill = enFill,
-        TextFn = textFn,
-        HealthFn = healthFn,
-        Tag = tag,
-        Color = color,
-    }
-end
-
-local function ClearESP(tag)
-    for adornee, entry in pairs(ESPCache) do
-        if not tag or entry.Tag == tag then
-            pcall(function() entry.Billboard:Destroy() end)
-            ESPCache[adornee] = nil
-        end
-    end
-end
-
-local function PlayerESP()
-    if not State.ESPPlayer then return end
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LP and plr.Character then
-            local char = plr.Character
-            local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if head and hum and hum.Health > 0 and not ESPCache[head] then
-                local sameTeam = LP.Team and plr.Team and LP.Team == plr.Team
-                local color = sameTeam and Color3.fromRGB(0, 255, 140) or Color3.fromRGB(255, 60, 60)
-
-                AddESP(head, color, function()
-                    local myHead = LP.Character and (LP.Character:FindFirstChild("Head") or LP.Character:FindFirstChild("HumanoidRootPart"))
-                    local dist = (myHead and head.Parent) and math.floor((myHead.Position - head.Position).Magnitude) or 0
-                    local data = plr:FindFirstChild("Data")
-                    local level = data and data:FindFirstChild("Level") and tostring(data.Level.Value) or "?"
-                    return string.format(
-                        "<b>%s</b> <font color='rgb(255,215,0)'>[Lv. %s]</font> • <font color='rgb(210,210,210)'>%dm</font>",
-                        plr.DisplayName or plr.Name, level, dist
-                    )
-                end, function()
-                    local h = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
-                    if not h then return 0, color, "", nil, nil, nil end
-                    local hp = math.floor(h.Health)
-                    local maxhp = math.max(math.floor(h.MaxHealth), 1)
-                    local hpPct = math.clamp(hp / maxhp, 0, 1)
-
-                    local en, enMax = 100, 100
-                    local c = plr.Character
-                    if c then
-                        local e = c:FindFirstChild("Energy")
-                        if e and e:IsA("ValueBase") then
-                            en = tonumber(e.Value) or 100
-                            enMax = math.max(tonumber(e.MaxValue) or 100, 1)
-                        end
-                    end
-                    local enPct = math.clamp(en / enMax, 0, 1)
-                    return hpPct, color, string.format("%d/%d HP", hp, maxhp),
-                           enPct, Color3.fromRGB(70, 180, 255), string.format("%d/%d EN", en, enMax)
-                end, function()
-                    return GetHeadshotUrl(plr.UserId)
-                end, "Player")
-            end
-        end
-    end
-end
-
-local function IslandESP()
-    if not State.ESPIsland then return end
-    local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
-    if not worldOrigin then return end
-    local locations = worldOrigin:FindFirstChild("Locations")
-    if not locations then return end
-    for _, part in ipairs(locations:GetChildren()) do
-        if part:IsA("BasePart") and part.Name ~= "Sea" and not ESPCache[part] then
-            AddESP(part, Color3.fromRGB(100, 200, 255), function()
-                local myHead = LP.Character and (LP.Character:FindFirstChild("Head") or LP.Character:FindFirstChild("HumanoidRootPart"))
-                local dist = (myHead and part.Parent) and math.floor((myHead.Position - part.Position).Magnitude) or 0
-                return string.format(
-                    "<b><font color='rgb(100,200,255)'>%s</font></b>\n<font color='rgb(200,200,200)'>%d studs</font>",
-                    part.Name, dist
-                )
-            end, nil, nil, "Island")
-        end
-    end
-end
-
-local function UpdateESP()
-    for adornee, entry in pairs(ESPCache) do
-        if not adornee or not adornee.Parent then
-            pcall(function() entry.Billboard:Destroy() end)
-            ESPCache[adornee] = nil
-        else
-            if entry.TextFn then
-                local ok, result = pcall(entry.TextFn)
-                if ok and result then
-                    entry.Text.Text = result
-                end
-            end
-            if entry.HealthFn then
-                local ok, hpPct, hpCol, _hpText, enPct, enCol = pcall(entry.HealthFn)
-                if ok then
-                    if entry.HPFill and hpPct ~= nil then
-                        entry.HPFill.Size = UDim2.new(math.clamp(hpPct, 0, 1), 0, 1, 0)
-                        if hpCol then entry.HPFill.BackgroundColor3 = hpCol end
-                    end
-                    if entry.ENFill and enPct ~= nil then
-                        entry.ENFill.Size = UDim2.new(math.clamp(enPct, 0, 1), 0, 1, 0)
-                        if enCol then entry.ENFill.BackgroundColor3 = enCol end
-                    end
-                end
-            end
-        end
-    end
-end
-
--- ESP update loop (fast)
-task.spawn(function()
-    while State.Loaded do
-        task.wait(0.3)
-        if State.ESPPlayer or State.ESPIsland then
-            pcall(UpdateESP)
-        end
-    end
-end)
-
--- ESP scan loop (slow)
-task.spawn(function()
-    while State.Loaded do
-        task.wait(0.8)
-        if State.ESPPlayer then pcall(PlayerESP) end
-        if State.ESPIsland then pcall(IslandESP) end
     end
 end)
 
@@ -847,13 +617,13 @@ end)
 -- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV14"
+ui.Name = "ExtractV13"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 410)
-frame.Position = UDim2.new(0, 20, 0.5, -205)
+frame.Size = UDim2.new(0, 240, 0, 320)
+frame.Position = UDim2.new(0, 20, 0.5, -160)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -865,7 +635,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 28)
 title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
 title.BorderSizePixel = 0
-title.Text = "Extract v14"
+title.Text = "Extract v13"
 title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -981,40 +751,10 @@ makeToggle(
     function(v) State.AutoM1 = v end
 )
 
--- ESP section
-local espLabel = Instance.new("TextLabel")
-espLabel.Size = UDim2.new(1, -20, 0, 20)
-espLabel.Position = UDim2.new(0, 10, 0, 276)
-espLabel.BackgroundTransparency = 1
-espLabel.Text = "— ESP —"
-espLabel.TextColor3 = Color3.fromRGB(140, 140, 160)
-espLabel.Font = Enum.Font.GothamBold
-espLabel.TextSize = 11
-espLabel.TextXAlignment = Enum.TextXAlignment.Left
-espLabel.Parent = frame
-
-makeToggle(
-    "Player ESP: OFF", "Player ESP: ON",
-    296, Color3.fromRGB(80, 80, 80), Color3.fromRGB(60, 200, 140), false,
-    function(v)
-        State.ESPPlayer = v
-        if not v then ClearESP("Player") end
-    end
-)
-
-makeToggle(
-    "Island ESP: OFF", "Island ESP: ON",
-    329, Color3.fromRGB(80, 80, 80), Color3.fromRGB(100, 160, 220), false,
-    function(v)
-        State.ESPIsland = v
-        if not v then ClearESP("Island") end
-    end
-)
-
 -- Unload
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 370)
+unloadBtn.Position = UDim2.new(0, 10, 0, 280)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 unloadBtn.BorderSizePixel = 0
 unloadBtn.Text = "Unload"
@@ -1025,7 +765,7 @@ unloadBtn.Parent = frame
 Instance.new("UICorner", unloadBtn).CornerRadius = UDim.new(0, 5)
 
 -- ============================================
--- STATUS PANEL
+-- STATUS PANEL (top-right)
 -- ============================================
 local statusGui = Instance.new("ScreenGui")
 statusGui.Name = "ExtractStatus"
@@ -1073,23 +813,22 @@ local hakiLine  = makeStatusLine(60)
 unloadBtn.MouseButton1Click:Connect(function()
     State.TPChase = false
     State.AutoM1 = false
-    State.ESPPlayer = false
-    State.ESPIsland = false
     State.Loaded = false
-    ClearESP(nil)
     local hrp = getHRP()
     if hrp then hrp.Anchored = false end
     if heartbeatConn then heartbeatConn:Disconnect() end
     if ui then ui:Destroy() end
     if statusGui then statusGui:Destroy() end
     getgenv().ExtractV6_Lock = false
-    print("[Extract v14] Unloaded.")
+    print("[Extract v13] Unloaded.")
 end)
 
+-- Status updater
 task.spawn(function()
     while State.Loaded do
         task.wait(1)
         if not statusFrame.Parent then break end
+
         if Runtime.NoFogApplied then
             nofogLine.Text = "✓ NoFog working"
             nofogLine.TextColor3 = Color3.fromRGB(100, 220, 140)
@@ -1097,6 +836,7 @@ task.spawn(function()
             nofogLine.Text = "… NoFog pending"
             nofogLine.TextColor3 = Color3.fromRGB(220, 180, 80)
         end
+
         if Runtime.FPSApplied then
             fpsLine.Text = "✓ FPS Boost working"
             fpsLine.TextColor3 = Color3.fromRGB(100, 220, 140)
@@ -1104,11 +844,13 @@ task.spawn(function()
             fpsLine.Text = "… FPS Boost pending"
             fpsLine.TextColor3 = Color3.fromRGB(220, 180, 80)
         end
+
         hakiLine.Text = "✓ Ken/Buso/V3/V4 running"
         hakiLine.TextColor3 = Color3.fromRGB(100, 220, 140)
     end
 end)
 
+-- Player info updater
 task.spawn(function()
     while State.Loaded do
         task.wait(0.2)
@@ -1118,13 +860,18 @@ task.spawn(function()
         local ping = math.floor((LP:GetNetworkPing() or 0) * 1000 + 0.5)
         playerInfoText.Text = string.format(
             "%s [%d]\nTeam: %s   Lv: %s\nBounty: %s   Ping: %dms   FPS: %d",
-            LP.Name, LP.UserId, getTeamName(),
+            LP.Name,
+            LP.UserId,
+            getTeamName(),
             level and tostring(level) or "?",
-            fmtNum(bounty), ping, fpsValue
+            fmtNum(bounty),
+            ping,
+            fpsValue
         )
     end
 end)
 
+-- Target info updater
 task.spawn(function()
     while State.Loaded do
         task.wait(0.2)
@@ -1141,9 +888,6 @@ task.spawn(function()
             targetId.Text = "ID: -   Dist: -"
         end
     end
-end)
-
-print("[Extract v14] Loaded. Player/Island ESP available.")
 end)
 
 print("[Extract v13] Loaded. Haki/Race always-on.")
