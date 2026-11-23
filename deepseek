@@ -2,15 +2,17 @@
     Blox Fruits — Extract v12
     Changes from v11:
       - Remove Lava runs automatically on load (button removed)
-      - Team selection via TEAM constant at top of script (buttons removed)
-      - FPS + Ping display added to status panel
+      - Auto-join team configured via CONFIG.AutoJoinTeam (buttons removed)
+      - Player info panel: Name, UserId, Team, Level, Bounty, Ping, FPS
 ]]
 
 -- ============================================
--- ★ CONFIG — ここを書き換えるだけ ★
--- TEAM: "Pirates" または "Marines"
+-- CONFIG — 変更はここだけ
 -- ============================================
-local TEAM = "Pirates"
+-- 自動参加するチーム。 "Pirates" / "Marines" / nil (無効)
+local CONFIG = {
+    AutoJoinTeam = "Pirates",
+}
 
 -- ============================================
 -- SINGLE INSTANCE GUARD
@@ -57,9 +59,6 @@ local State = {
 local Runtime = {
     NoFogApplied = false,
     FPSApplied = false,
-    FPS = 0,
-    Ping = 0,
-    LavaRemoved = false,
 }
 
 -- ============================================
@@ -75,51 +74,37 @@ local function getRemotes()
     return remotes:FindFirstChild("CommF_"), remotes:FindFirstChild("CommE")
 end
 
--- ============================================
--- FPS / PING TRACKER
--- ============================================
-task.spawn(function()
-    local frames = 0
-    local lastTime = tick()
-    RunService.Heartbeat:Connect(function()
-        frames = frames + 1
-        local now = tick()
-        if now - lastTime >= 1 then
-            Runtime.FPS = frames / (now - lastTime)
-            frames = 0
-            lastTime = now
-        end
-        pcall(function()
-            Runtime.Ping = math.floor(LP:GetNetworkPing() * 1000)
-        end)
-    end)
-end)
-
--- ============================================
--- AUTO JOIN TEAM (uses TEAM constant)
--- ============================================
-local function tryJoinTeam(teamName)
-    local commF = getRemotes()
-    if not commF then return false end
-    if LP.Team then return false end
-    pcall(function() commF:InvokeServer("SetTeam", teamName) end)
-    task.wait(0.3)
-    return LP.Team ~= nil
+local function fmtNum(n)
+    if not n then return "?" end
+    n = tonumber(n)
+    if not n then return "?" end
+    if n >= 1e6 then return string.format("%.2fM", n / 1e6) end
+    if n >= 1e3 then return string.format("%.1fK", n / 1e3) end
+    return tostring(math.floor(n))
 end
 
-task.spawn(function()
-    task.wait(2)
-    for _ = 1, 15 do
-        if not State.Loaded then return end
-        if LP.Team then return end
-        if tryJoinTeam(TEAM) then
-            print("[Extract v12] Auto-joined " .. TEAM .. ".")
-            return
-        end
-        task.wait(2)
+local function getBounty(plr)
+    local data = plr:FindFirstChild("Data")
+    if data then
+        local b = data:FindFirstChild("Bounty")
+        if b then return b.Value end
     end
-    warn("[Extract v12] Auto-join " .. TEAM .. " timed out.")
-end)
+    return plr:GetAttribute("Bounty")
+end
+
+local function getLevel(plr)
+    local data = plr:FindFirstChild("Data")
+    if data then
+        local l = data:FindFirstChild("Level")
+        if l then return l.Value end
+    end
+    return plr:GetAttribute("Level")
+end
+
+local function getTeamName()
+    if LP.Team then return LP.Team.Name end
+    return "None"
+end
 
 -- ============================================
 -- REMOVE LAVA (auto on load)
@@ -144,16 +129,38 @@ local function removeLava()
 end
 
 task.spawn(function()
-    task.wait(1)
-    for _ = 1, 10 do
+    task.wait(2)
+    for _ = 1, 5 do
         if not State.Loaded then return end
         if removeLava() then
-            Runtime.LavaRemoved = true
             print("[Extract v12] Lava removed.")
             return
         end
         task.wait(2)
     end
+end)
+
+-- ============================================
+-- AUTO JOIN TEAM
+-- ============================================
+task.spawn(function()
+    if not CONFIG.AutoJoinTeam then return end
+    task.wait(2)
+    for _ = 1, 15 do
+        if not State.Loaded then return end
+        if LP.Team then return end
+        local commF = getRemotes()
+        if commF then
+            pcall(function() commF:InvokeServer("SetTeam", CONFIG.AutoJoinTeam) end)
+            task.wait(0.3)
+            if LP.Team then
+                print("[Extract v12] Auto-joined " .. CONFIG.AutoJoinTeam)
+                return
+            end
+        end
+        task.wait(2)
+    end
+    warn("[Extract v12] Auto-join timed out.")
 end)
 
 -- ============================================
@@ -226,6 +233,22 @@ task.spawn(function()
     while State.Loaded do
         pcall(forceFPSBoost)
         task.wait(60)
+    end
+end)
+
+-- ============================================
+-- FPS COUNTER
+-- ============================================
+local fpsCounter = 0
+local fpsValue = 0
+RunService.RenderStepped:Connect(function()
+    fpsCounter = fpsCounter + 1
+end)
+task.spawn(function()
+    while State.Loaded do
+        task.wait(1)
+        fpsValue = fpsCounter
+        fpsCounter = 0
     end
 end)
 
@@ -601,8 +624,8 @@ ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 460)
-frame.Position = UDim2.new(0, 20, 0.5, -230)
+frame.Size = UDim2.new(0, 240, 0, 470)
+frame.Position = UDim2.new(0, 20, 0.5, -235)
 frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 frame.BorderSizePixel = 0
 frame.Active = true
@@ -621,9 +644,31 @@ title.TextSize = 13
 title.Parent = frame
 Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
 
+-- Player info box
+local playerBox = Instance.new("Frame")
+playerBox.Size = UDim2.new(1, -20, 0, 72)
+playerBox.Position = UDim2.new(0, 10, 0, 35)
+playerBox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+playerBox.BorderSizePixel = 0
+playerBox.Parent = frame
+Instance.new("UICorner", playerBox).CornerRadius = UDim.new(0, 6)
+
+local playerInfoText = Instance.new("TextLabel")
+playerInfoText.Size = UDim2.new(1, -10, 1, 0)
+playerInfoText.Position = UDim2.new(0, 5, 0, 0)
+playerInfoText.BackgroundTransparency = 1
+playerInfoText.Text = "loading..."
+playerInfoText.TextColor3 = Color3.fromRGB(220, 220, 240)
+playerInfoText.Font = Enum.Font.Gotham
+playerInfoText.TextSize = 11
+playerInfoText.TextXAlignment = Enum.TextXAlignment.Left
+playerInfoText.TextYAlignment = Enum.TextYAlignment.Top
+playerInfoText.Parent = playerBox
+
+-- Target box
 local targetBox = Instance.new("Frame")
 targetBox.Size = UDim2.new(1, -20, 0, 50)
-targetBox.Position = UDim2.new(0, 10, 0, 35)
+targetBox.Position = UDim2.new(0, 10, 0, 112)
 targetBox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
 targetBox.BorderSizePixel = 0
 targetBox.Parent = frame
@@ -679,7 +724,7 @@ end
 
 makeToggle(
     "TP Chase: OFF", "TP Chase: ON",
-    95, Color3.fromRGB(80, 80, 80), Color3.fromRGB(70, 140, 220), false,
+    170, Color3.fromRGB(80, 80, 80), Color3.fromRGB(70, 140, 220), false,
     function(v)
         State.TPChase = v
         if not v then
@@ -691,7 +736,7 @@ makeToggle(
 
 local nextBtn = Instance.new("TextButton")
 nextBtn.Size = UDim2.new(1, -20, 0, 28)
-nextBtn.Position = UDim2.new(0, 10, 0, 130)
+nextBtn.Position = UDim2.new(0, 10, 0, 205)
 nextBtn.BackgroundColor3 = Color3.fromRGB(180, 130, 60)
 nextBtn.BorderSizePixel = 0
 nextBtn.Text = "Next Target"
@@ -704,14 +749,14 @@ nextBtn.MouseButton1Click:Connect(function() cycleTarget() end)
 
 makeToggle(
     "Auto M1: OFF", "Auto M1: ON",
-    165, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 80, 80), false,
+    240, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 80, 80), false,
     function(v) State.AutoM1 = v end
 )
 
 -- Haki section
 local hakiLabel = Instance.new("TextLabel")
 hakiLabel.Size = UDim2.new(1, -20, 0, 20)
-hakiLabel.Position = UDim2.new(0, 10, 0, 205)
+hakiLabel.Position = UDim2.new(0, 10, 0, 275)
 hakiLabel.BackgroundTransparency = 1
 hakiLabel.Text = "— Haki / Race —"
 hakiLabel.TextColor3 = Color3.fromRGB(140, 140, 160)
@@ -722,32 +767,32 @@ hakiLabel.Parent = frame
 
 makeToggle(
     "Auto Ken: OFF", "Auto Ken: ON",
-    225, Color3.fromRGB(80, 80, 80), Color3.fromRGB(140, 100, 220), false,
+    295, Color3.fromRGB(80, 80, 80), Color3.fromRGB(140, 100, 220), false,
     function(v) State.AutoKen = v end
 )
 
 makeToggle(
     "Auto Buso: OFF", "Auto Buso: ON",
-    258, Color3.fromRGB(80, 80, 80), Color3.fromRGB(180, 100, 100), false,
+    328, Color3.fromRGB(80, 80, 80), Color3.fromRGB(180, 100, 100), false,
     function(v) State.AutoBuso = v end
 )
 
 makeToggle(
     "Auto V3: OFF", "Auto V3: ON",
-    291, Color3.fromRGB(80, 80, 80), Color3.fromRGB(100, 180, 140), false,
+    361, Color3.fromRGB(80, 80, 80), Color3.fromRGB(100, 180, 140), false,
     function(v) State.AutoV3 = v end
 )
 
 makeToggle(
     "Auto V4: OFF", "Auto V4: ON",
-    324, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 160, 60), false,
+    394, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 160, 60), false,
     function(v) State.AutoV4 = v end
 )
 
 -- Unload
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 365)
+unloadBtn.Position = UDim2.new(0, 10, 0, 432)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
 unloadBtn.BorderSizePixel = 0
 unloadBtn.Text = "Unload"
@@ -766,7 +811,7 @@ statusGui.ResetOnSpawn = false
 statusGui.Parent = LP:WaitForChild("PlayerGui")
 
 local statusFrame = Instance.new("Frame")
-statusFrame.Size = UDim2.new(0, 170, 0, 96)
+statusFrame.Size = UDim2.new(0, 170, 0, 60)
 statusFrame.Position = UDim2.new(1, -180, 0, 10)
 statusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 statusFrame.BackgroundTransparency = 0.2
@@ -800,9 +845,7 @@ local function makeStatusLine(y)
 end
 
 local nofogLine = makeStatusLine(24)
-local fpsLine   = makeStatusLine(40)
-local perfLine  = makeStatusLine(56)
-local lavaLine  = makeStatusLine(74)
+local fpsLine   = makeStatusLine(42)
 
 unloadBtn.MouseButton1Click:Connect(function()
     State.TPChase = false
@@ -842,25 +885,27 @@ task.spawn(function()
             fpsLine.Text = "… FPS Boost pending"
             fpsLine.TextColor3 = Color3.fromRGB(220, 180, 80)
         end
+    end
+end)
 
-        if Runtime.LavaRemoved then
-            lavaLine.Text = "✓ Lava removed"
-            lavaLine.TextColor3 = Color3.fromRGB(100, 220, 140)
-        else
-            lavaLine.Text = "… Lava pending"
-            lavaLine.TextColor3 = Color3.fromRGB(220, 180, 80)
-        end
-
-        local ping = Runtime.Ping
-        local fps = math.floor(Runtime.FPS + 0.5)
-        perfLine.Text = string.format("FPS: %d   Ping: %dms", fps, ping)
-        if fps >= 40 and ping < 150 then
-            perfLine.TextColor3 = Color3.fromRGB(100, 220, 140)
-        elseif fps >= 20 and ping < 300 then
-            perfLine.TextColor3 = Color3.fromRGB(220, 200, 100)
-        else
-            perfLine.TextColor3 = Color3.fromRGB(220, 100, 100)
-        end
+-- Player info updater
+task.spawn(function()
+    while State.Loaded do
+        task.wait(0.2)
+        if not playerInfoText.Parent then break end
+        local bounty = getBounty(LP)
+        local level = getLevel(LP)
+        local ping = math.floor((LP:GetNetworkPing() or 0) * 1000 + 0.5)
+        playerInfoText.Text = string.format(
+            "%s [%d]\nTeam: %s   Lv: %s\nBounty: %s   Ping: %dms   FPS: %d",
+            LP.Name,
+            LP.UserId,
+            getTeamName(),
+            level and tostring(level) or "?",
+            fmtNum(bounty),
+            ping,
+            fpsValue
+        )
     end
 end)
 
@@ -868,7 +913,7 @@ end)
 task.spawn(function()
     while State.Loaded do
         task.wait(0.2)
-        if not frame.Parent then break end
+        if not targetBox.Parent then break end
         local t = State.Target
         if t and t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
             local hrp = getHRP()
@@ -883,7 +928,4 @@ task.spawn(function()
     end
 end)
 
-print("[Extract v12] Loaded. Team=" .. TEAM .. " | Lava auto-remove | FPS/Ping displayed.")
-end)
-
-print("[Extract v11] Loaded. FastMode removed. Auto-join Pirates on load.")
+print("[Extract v12] Loaded. Auto team = " .. tostring(CONFIG.AutoJoinTeam))
