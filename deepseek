@@ -1,34 +1,57 @@
 --[[
-    Blox Fruits — Extract v13
-    Changes from v12:
-      - Auto Ken / Buso / V3 / V4 are always-on (no toggles)
-      - Haki loop runs continuously on load
-      - UI section removed; frame shrinks
+    Blox Fruits — Extract v19
+    UI: Custom info panel (image-style)
+    Logic: v18 + Aim snap + altitude floor + 1.25x range
+    Changes from v18:
+      - Skill aim: snapFaceToTarget() + moveMouseToTarget() before each fireKey
+      - OrbitRadius 37.5 -> 46.875 (+25%), AttackRange 150 -> 187.5 (+25%)
+      - State.MinFlyHeight = 40: Y floor on chunk descent, orbit center, orbit position
+      - Chunk movement: TweenService replaced with per-frame CFrame (physics-stable)
+      - Emergency lift on chase start if character Y < 5 (fallen in sea)
 ]]
 
 -- ============================================
--- CONFIG — 変更はここだけ
+-- CONFIG
 -- ============================================
--- 自動参加するチーム。 "Pirates" / "Marines" / nil (無効)
 local CONFIG = {
     AutoJoinTeam = "Pirates",
+    LevelTolerance = 0.25,
+
+    ComboOrder = { "Fighting", "Fruit", "Gun", "Sword" },
+    SkillKeys = { "Z", "X", "C", "V" },
+    SkillInterval = 0.22,
+    EquipWait = 0.30,
+    SkillMaxRange = 300,
 }
 
 -- ============================================
--- SINGLE INSTANCE GUARD
+-- GUARD
 -- ============================================
-if getgenv().ExtractV6_Lock then
-    warn("[Extract v13] Already running. Click 'Unload' in the existing UI first.")
-    return
-end
-getgenv().ExtractV6_Lock = true
-
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local LP = Players.LocalPlayer
+
+if getgenv().ExtractV6_Lock then
+    local pg = LP:FindFirstChild("PlayerGui")
+    if pg and pg:FindFirstChild("ExtractUI") then
+        warn("[Extract v19] Already running. Unload first.")
+        return
+    end
+    getgenv().ExtractV6_Lock = false
+end
+getgenv().ExtractV6_Lock = true
+
+do
+    local pg = LP:FindFirstChild("PlayerGui")
+    if pg then
+        for _, v in ipairs(pg:GetChildren()) do
+            if v.Name:match("^Extract") then pcall(function() v:Destroy() end) end
+        end
+    end
+end
 
 -- ============================================
 -- STATE
@@ -37,25 +60,34 @@ local State = {
     Loaded = true,
     TPChase = false,
     AutoM1 = false,
+    CameraLock = false,
+    AutoCombo = false,
     Target = nil,
     TargetIndex = 1,
     TargetList = {},
     FarBlacklist = {},
+
     ChaseSpeed = 250,
     ChunkSize = 200,
     ChunkWait = 0.02,
-    OrbitRadius = 37.5,
+    OrbitRadius = 46.875,   -- was 37.5, x1.25
     OrbitHeight = 16,
     OrbitSpeed = 10,
-    AttackRange = 150,
+    AttackRange = 187.5,    -- was 150, x1.25
     BuddhaRange = 1000,
     MaxTargetDistance = 75000,
+    MinFlyHeight = 40,      -- new: minimum Y over sea level
+
+    RequireOutsideSafeZone = true,
+    RequirePvpOn = true,
+    RequireLevelRange = true,
+
+    ComboIndex = 1,
+    CurrentComboWeapon = nil,
 }
 
-local Runtime = {
-    NoFogApplied = false,
-    FPSApplied = false,
-}
+local Runtime = { NoFogApplied = false, FPSApplied = false }
+local Stats = { StartTime = os.time(), StartBounty = 0, LastBounty = 0, BountyEarned = 0, TotalKills = 0 }
 
 -- ============================================
 -- HELPERS
@@ -70,110 +102,153 @@ local function getRemotes()
     return remotes:FindFirstChild("CommF_"), remotes:FindFirstChild("CommE")
 end
 
-local function fmtNum(n)
-    if not n then return "?" end
-    n = tonumber(n)
-    if not n then return "?" end
-    if n >= 1e6 then return string.format("%.2fM", n / 1e6) end
-    if n >= 1e3 then return string.format("%.1fK", n / 1e3) end
-    return tostring(math.floor(n))
+local function commaFormat(n)
+    n = math.floor(tonumber(n) or 0)
+    local s = tostring(n)
+    local k
+    repeat s, k = s:gsub("^(-?%d+)(%d%d%d)", "%1,%2") until k == 0
+    return s
 end
 
 local function getBounty(plr)
-    local data = plr:FindFirstChild("Data")
-    if data then
-        local b = data:FindFirstChild("Bounty")
-        if b then return b.Value end
-    end
-    return plr:GetAttribute("Bounty")
+    local d = plr:FindFirstChild("Data")
+    local b = d and d:FindFirstChild("Bounty")
+    if b then return b.Value end
+    return plr:GetAttribute("Bounty") or 0
 end
 
 local function getLevel(plr)
-    local data = plr:FindFirstChild("Data")
-    if data then
-        local l = data:FindFirstChild("Level")
-        if l then return l.Value end
-    end
+    local d = plr:FindFirstChild("Data")
+    local l = d and d:FindFirstChild("Level")
+    if l then return l.Value end
     return plr:GetAttribute("Level")
 end
 
-local function getTeamName()
-    if LP.Team then return LP.Team.Name end
-    return "None"
+local function getBeli(plr)
+    local d = plr:FindFirstChild("Data")
+    local b = d and d:FindFirstChild("Beli")
+    if b then return b.Value end
+    return 0
 end
 
 -- ============================================
--- REMOVE LAVA (auto on load)
+-- FILTERS
 -- ============================================
-local function removeLava()
-    local removed = false
-    local mapPart = workspace:FindFirstChild("Map")
-    if mapPart then
-        for _, mapName in ipairs({"CircleIsland", "GhostShipInterior"}) do
-            local v2 = mapPart:FindFirstChild(mapName)
-            if v2 then
-                for _, desc in ipairs(v2:GetDescendants()) do
-                    if desc.Name == "LavaParts" then
-                        desc:Destroy()
-                        removed = true
-                    end
-                end
+local SafeZoneCache = {}
+local SAFEZONE_CACHE_TTL = 0.3
+
+local function isInSafeZone(plr)
+    local now = tick()
+    local cached = SafeZoneCache[plr.UserId]
+    if cached and cached.expires > now then return cached.inSafe end
+    local result = false
+    local char = plr.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local worldOrigin = workspace:FindFirstChild("_WorldOrigin")
+    local safeZones = worldOrigin and worldOrigin:FindFirstChild("SafeZones")
+    if hrp and safeZones then
+        for _, child in ipairs(safeZones:GetChildren()) do
+            local mesh = child:FindFirstChild("Mesh")
+            if mesh and (hrp.Position - child.Position).Magnitude <= child.Size.X * mesh.Scale.X / 2 then
+                result = true
+                break
             end
         end
     end
-    return removed
+    SafeZoneCache[plr.UserId] = { inSafe = result, expires = now + SAFEZONE_CACHE_TTL }
+    return result
 end
 
+local function isPvpOff(plr)
+    return plr:GetAttribute("PvpDisabled") == true
+end
+
+local function isLevelEligible(plr)
+    if plr == LP then return false end
+    local myLevel = getLevel(LP)
+    if not myLevel or myLevel <= 0 then return true end
+    local tLevel = getLevel(plr)
+    if not tLevel or tLevel <= 0 then return false end
+    return tLevel >= myLevel * (1 - CONFIG.LevelTolerance) and tLevel <= myLevel * (1 + CONFIG.LevelTolerance)
+end
+
+local function isAttackable(plr)
+    if plr == LP then return false end
+    if State.RequirePvpOn and isPvpOff(plr) then return false end
+    if State.RequireOutsideSafeZone and isInSafeZone(plr) then return false end
+    if State.RequireLevelRange and not isLevelEligible(plr) then return false end
+    return true
+end
+
+-- ============================================
+-- KILL TRACKING
+-- ============================================
+local function hookPlayer(plr)
+    if plr == LP then return end
+    local function hookChar(char)
+        local hum = char:WaitForChild("Humanoid", 5)
+        if not hum then return end
+        hum.Died:Connect(function()
+            local myHRP = getHRP()
+            local tHRP = char:FindFirstChild("HumanoidRootPart")
+            if myHRP and tHRP and (myHRP.Position - tHRP.Position).Magnitude <= 2000 then
+                Stats.TotalKills = Stats.TotalKills + 1
+            end
+        end)
+    end
+    if plr.Character then hookChar(plr.Character) end
+    plr.CharacterAdded:Connect(hookChar)
+end
+for _, p in ipairs(Players:GetPlayers()) do hookPlayer(p) end
+Players.PlayerAdded:Connect(hookPlayer)
+
+task.spawn(function()
+    task.wait(1)
+    Stats.StartBounty = getBounty(LP)
+    Stats.LastBounty = Stats.StartBounty
+end)
+
+-- ============================================
+-- LAVA / TEAM
+-- ============================================
 task.spawn(function()
     task.wait(2)
     for _ = 1, 5 do
         if not State.Loaded then return end
-        if removeLava() then
-            print("[Extract v13] Lava removed.")
-            return
+        local done = false
+        local mapPart = workspace:FindFirstChild("Map")
+        if mapPart then
+            for _, name in ipairs({"CircleIsland", "GhostShipInterior"}) do
+                local v2 = mapPart:FindFirstChild(name)
+                if v2 then
+                    for _, d in ipairs(v2:GetDescendants()) do
+                        if d.Name == "LavaParts" then d:Destroy(); done = true end
+                    end
+                end
+            end
         end
+        if done then return end
         task.wait(2)
     end
 end)
 
--- ============================================
--- AUTO JOIN TEAM
--- ============================================
 task.spawn(function()
     if not CONFIG.AutoJoinTeam then return end
     task.wait(2)
     for _ = 1, 15 do
-        if not State.Loaded then return end
-        if LP.Team then return end
+        if not State.Loaded or LP.Team then return end
         local commF = getRemotes()
         if commF then
             pcall(function() commF:InvokeServer("SetTeam", CONFIG.AutoJoinTeam) end)
             task.wait(0.3)
-            if LP.Team then
-                print("[Extract v13] Auto-joined " .. CONFIG.AutoJoinTeam)
-                return
-            end
+            if LP.Team then return end
         end
         task.wait(2)
     end
-    warn("[Extract v13] Auto-join timed out.")
 end)
 
 -- ============================================
--- NO FOG (always-on)
--- ============================================
-local function applyNoFog()
-    local lighting = game:GetService("Lighting")
-    lighting.FogEnd = math.huge
-    for _, name in ipairs({"FantasySky", "LightingLayers", "Sky", "SeaTerrorCC"}) do
-        local obj = lighting:FindFirstChild(name)
-        if obj then pcall(function() obj:Destroy() end) end
-    end
-    Runtime.NoFogApplied = true
-end
-
--- ============================================
--- FORCE FPS BOOST (always-on, reapply 60s)
+-- FPS BOOST
 -- ============================================
 local function forceFPSBoost()
     local lighting = game:GetService("Lighting")
@@ -187,26 +262,18 @@ local function forceFPSBoost()
     lighting.GlobalShadows = false
     lighting.FogEnd = 9e9
     pcall(function() settings().Rendering.QualityLevel = 1 end)
-
     for _, d in pairs(game:GetDescendants()) do
         if d:IsA("Part") or d:IsA("UnionOperation") or d:IsA("MeshPart")
             or d:IsA("CornerWedgePart") or d:IsA("TrussPart") then
-            pcall(function()
-                d.Material = Enum.Material.Plastic
-                d.Reflectance = 0
-            end)
+            pcall(function() d.Material = Enum.Material.Plastic; d.Reflectance = 0 end)
         elseif d:IsA("Decal") then
             pcall(function() d.Transparency = 1 end)
         elseif d:IsA("ParticleEmitter") or d:IsA("Trail") then
             pcall(function() d.Lifetime = NumberRange.new(0) end)
         elseif d:IsA("Explosion") then
-            pcall(function()
-                d.BlastPressure = 1
-                d.BlastRadius = 1
-            end)
+            pcall(function() d.BlastPressure = 1; d.BlastRadius = 1 end)
         end
     end
-
     for _, d in pairs(lighting:GetDescendants()) do
         if d:IsA("BlurEffect") or d:IsA("SunRaysEffect")
             or d:IsA("ColorCorrectionEffect") or d:IsA("BloomEffect")
@@ -214,7 +281,6 @@ local function forceFPSBoost()
             pcall(function() d.Enabled = false end)
         end
     end
-
     for _, d in pairs(workspace:GetDescendants()) do
         if d:IsA("ForceField") or d:IsA("Sparkles")
             or d:IsA("Smoke") or d:IsA("Fire") then
@@ -226,20 +292,11 @@ end
 
 task.spawn(function()
     task.wait(0.5)
-    while State.Loaded do
-        pcall(forceFPSBoost)
-        task.wait(60)
-    end
+    while State.Loaded do pcall(forceFPSBoost); task.wait(60) end
 end)
 
--- ============================================
--- FPS COUNTER
--- ============================================
-local fpsCounter = 0
-local fpsValue = 0
-RunService.RenderStepped:Connect(function()
-    fpsCounter = fpsCounter + 1
-end)
+local fpsCounter, fpsValue = 0, 0
+RunService.RenderStepped:Connect(function() fpsCounter = fpsCounter + 1 end)
 task.spawn(function()
     while State.Loaded do
         task.wait(1)
@@ -249,21 +306,14 @@ task.spawn(function()
 end)
 
 -- ============================================
--- HAKI / RACE LOOP (always-on)
+-- HAKI / RACE LOOP
 -- ============================================
 task.spawn(function()
     while State.Loaded do
-        pcall(applyNoFog)
         local char = getChar()
         if char then
             local commF, commE = getRemotes()
-
-            -- Auto Ken
-            if commE then
-                pcall(function() commE:FireServer("Ken", true) end)
-            end
-
-            -- Auto Buso
+            if commE then pcall(function() commE:FireServer("Ken", true) end) end
             if commF then
                 pcall(function()
                     if not char:HasTag("Buso") then
@@ -273,26 +323,166 @@ task.spawn(function()
                     end
                 end)
             end
-
-            -- Auto V3 (Agility)
-            if commE then
-                pcall(function() commE:FireServer("ActivateAbility") end)
-            end
-
-            -- Auto V4 (Race transform)
+            if commE then pcall(function() commE:FireServer("ActivateAbility") end) end
             pcall(function()
-                local backpack = LP:FindFirstChild("Backpack")
-                local awakening = backpack and backpack:FindFirstChild("Awakening")
-                local energy = char:FindFirstChild("RaceEnergy")
-                local transformed = char:FindFirstChild("RaceTransformed")
-                if awakening and energy and transformed then
-                    if energy.Value >= 1 and not transformed.Value then
-                        awakening.RemoteFunction:InvokeServer({true})
-                    end
+                local bp = LP:FindFirstChild("Backpack")
+                local aw = bp and bp:FindFirstChild("Awakening")
+                local en = char:FindFirstChild("RaceEnergy")
+                local tr = char:FindFirstChild("RaceTransformed")
+                if aw and en and tr and en.Value >= 1 and not tr.Value then
+                    aw.RemoteFunction:InvokeServer({true})
                 end
             end)
         end
         task.wait(0.5)
+    end
+end)
+
+-- ============================================
+-- AIM LOCK
+-- ============================================
+RunService:BindToRenderStep("ExtractAimLock", Enum.RenderPriority.Camera.Value + 1, function()
+    if not State.CameraLock then return end
+    local t = State.Target
+    if not t or not t.Character then return end
+    local head = t.Character:FindFirstChild("Head")
+    if not head then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    cam.CFrame = CFrame.lookAt(cam.CFrame.Position, head.Position)
+end)
+
+-- ============================================
+-- TOOL CLASSIFICATION
+-- ============================================
+local FightingStyleNames = {
+    ["Combat"] = true, ["Dark Step"] = true, ["Electric Claw"] = true,
+    ["Dragon Talon"] = true, ["Superhuman"] = true, ["Death Step"] = true,
+    ["Sharkman Karate"] = true, ["Godhuman"] = true, ["Sanguine Art"] = true,
+}
+
+local function getToolType(tool)
+    local wt = tool:GetAttribute("WeaponType") or tool:GetAttribute("ItemType")
+    if type(wt) == "string" then
+        local lw = wt:lower()
+        if lw:find("sword") then return "Sword" end
+        if lw:find("gun") then return "Gun" end
+        if lw:find("melee") or lw:find("fighting") then return "Fighting" end
+        if lw:find("fruit") then return "Fruit" end
+    end
+    if tool:GetAttribute("SwordType") then return "Sword" end
+    if tool:GetAttribute("GunType") then return "Gun" end
+    if tool:GetAttribute("FruitType") then return "Fruit" end
+    if FightingStyleNames[tool.Name] then return "Fighting" end
+    if tool:FindFirstChild("SwordRemote") then return "Sword" end
+    if tool:FindFirstChild("GunRemote") then return "Gun" end
+    if tool:FindFirstChild("FruitRemote") then return "Fruit" end
+    return nil
+end
+
+local function findToolByType(wantedType)
+    local bp = LP:FindFirstChild("Backpack")
+    if not bp then return nil end
+    for _, t in ipairs(bp:GetChildren()) do
+        if t:IsA("Tool") and getToolType(t) == wantedType then
+            return t
+        end
+    end
+    return nil
+end
+
+local function equipTool(tool)
+    local char = getChar()
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    return pcall(function() hum:EquipTool(tool) end)
+end
+
+local function fireKey(keyName)
+    local keyCode = Enum.KeyCode[keyName]
+    if not keyCode then return end
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+        task.wait(0.03)
+        VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+    end)
+end
+
+-- ============================================
+-- AIM HELPERS (skill aim correction)
+-- ============================================
+local function snapFaceToTarget()
+    local t = State.Target
+    if not t or not t.Character then return end
+    local head = t.Character:FindFirstChild("Head")
+    local hrp = getHRP()
+    if not (head and hrp) then return end
+    hrp.CFrame = CFrame.lookAt(hrp.CFrame.Position, head.Position)
+end
+
+local function moveMouseToTarget()
+    local t = State.Target
+    if not t or not t.Character then return end
+    local head = t.Character:FindFirstChild("Head")
+    if not head then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local pos, onScreen = cam:WorldToViewportPoint(head.Position)
+    if not onScreen then return end
+    pcall(function()
+        VirtualInputManager:SendMouseMoveEvent(pos.X, pos.Y, game)
+    end)
+end
+
+-- ============================================
+-- COMBO LOOP
+-- ============================================
+task.spawn(function()
+    while State.Loaded do
+        task.wait(0.1)
+
+        if not State.AutoCombo then
+            State.CurrentComboWeapon = nil
+            State.ComboIndex = 1
+            continue
+        end
+
+        local t = State.Target
+        if not t or not t.Character then continue end
+        local tHum = t.Character:FindFirstChildOfClass("Humanoid")
+        local tHRP = t.Character:FindFirstChild("HumanoidRootPart")
+        local hrp = getHRP()
+        if not (tHum and tHum.Health > 0 and tHRP and hrp) then continue end
+        if not isAttackable(t) then continue end
+        if (tHRP.Position - hrp.Position).Magnitude > CONFIG.SkillMaxRange then continue end
+
+        local order = CONFIG.ComboOrder
+        local n = #order
+        if n == 0 then continue end
+        local weaponType = order[State.ComboIndex]
+        local tool = findToolByType(weaponType)
+        if not tool then
+            State.ComboIndex = (State.ComboIndex % n) + 1
+            continue
+        end
+        State.ComboIndex = (State.ComboIndex % n) + 1
+        State.CurrentComboWeapon = weaponType
+
+        if not equipTool(tool) then continue end
+        task.wait(CONFIG.EquipWait)
+        if not State.AutoCombo or not State.Loaded then break end
+
+        local t2 = State.Target
+        if not t2 or not t2.Character then continue end
+
+        for _, key in ipairs(CONFIG.SkillKeys) do
+            if not State.AutoCombo or not State.Loaded then break end
+            snapFaceToTarget()
+            moveMouseToTarget()
+            fireKey(key)
+            task.wait(CONFIG.SkillInterval)
+        end
     end
 end)
 
@@ -304,6 +494,14 @@ local tpRunning = false
 local function chaseLoop(plr)
     local hum = getHum()
     if hum then hum:ChangeState(Enum.HumanoidStateType.Physics) end
+
+    -- Emergency lift if in water at chase start
+    do
+        local hrp0 = getHRP()
+        if hrp0 and hrp0.Position.Y < 5 then
+            hrp0.CFrame = CFrame.new(hrp0.Position.X, State.MinFlyHeight + 20, hrp0.Position.Z)
+        end
+    end
 
     local orbitAngle = 0
     local orbitActive = false
@@ -331,11 +529,9 @@ local function chaseLoop(plr)
                 if other ~= LP and other ~= plr then
                     local oHRP = other.Character and other.Character:FindFirstChild("HumanoidRootPart")
                     local oHum = other.Character and other.Character:FindFirstChildOfClass("Humanoid")
-                    if oHRP and oHum and oHum.Health > 0 then
-                        if (oHRP.Position - myPos).Magnitude <= 1500 then
-                            nearbyEnemy = true
-                            break
-                        end
+                    if oHRP and oHum and oHum.Health > 0 and (oHRP.Position - myPos).Magnitude <= 1500 then
+                        nearbyEnemy = true
+                        break
                     end
                 end
             end
@@ -353,6 +549,8 @@ local function chaseLoop(plr)
             if dist <= State.MaxTargetDistance then
                 waitActive = false
                 hrp.Anchored = false
+                -- Snap back to safe altitude on un-anchor
+                hrp.CFrame = CFrame.new(hrp.Position.X, math.max(hrp.Position.Y, State.MinFlyHeight), hrp.Position.Z)
                 orbitActive = false
                 smoothedCenter = nil
             elseif tick() >= waitUntil then
@@ -367,7 +565,11 @@ local function chaseLoop(plr)
         end
 
         if not waitActive then
+            -- Target center with MinFlyHeight floor
             local targetCenter = tPos + Vector3.new(0, State.OrbitHeight, 0)
+            if targetCenter.Y < State.MinFlyHeight then
+                targetCenter = Vector3.new(targetCenter.X, State.MinFlyHeight, targetCenter.Z)
+            end
             local horizDist = (Vector3.new(tPos.X, myPos.Y, tPos.Z) - myPos).Magnitude
 
             if not orbitActive and horizDist < State.OrbitRadius + 10 then
@@ -378,12 +580,16 @@ local function chaseLoop(plr)
             end
 
             if orbitActive then
-                local dt = task.wait()
+                local dt = math.min(task.wait(), 0.05)
                 if smoothedCenter and (smoothedCenter - targetCenter).Magnitude > 60 then
                     smoothedCenter = targetCenter
                 end
                 if not smoothedCenter then smoothedCenter = targetCenter end
                 smoothedCenter = smoothedCenter:Lerp(targetCenter, math.min(1, 15 * dt))
+                -- Y floor on smoothed orbit center
+                if smoothedCenter.Y < State.MinFlyHeight then
+                    smoothedCenter = Vector3.new(smoothedCenter.X, State.MinFlyHeight, smoothedCenter.Z)
+                end
                 orbitAngle = orbitAngle + effectiveOrbitSpeed * dt
 
                 local offset = Vector3.new(
@@ -392,6 +598,10 @@ local function chaseLoop(plr)
                     math.sin(orbitAngle) * State.OrbitRadius
                 )
                 local newPos = smoothedCenter + offset
+                -- Y floor on final orbit position
+                if newPos.Y < State.MinFlyHeight then
+                    newPos = Vector3.new(newPos.X, State.MinFlyHeight, newPos.Z)
+                end
                 local moveDelta = (newPos - hrp.Position).Magnitude
                 if moveDelta > 8 then
                     newPos = hrp.Position + (newPos - hrp.Position).Unit * 8
@@ -420,33 +630,15 @@ local function chaseLoop(plr)
                     local rel = myPos - targetCenter
                     orbitAngle = math.atan2(rel.Z, rel.X)
                 else
-                    local chunkMove = math.min(distToCenter, State.ChunkSize)
+                    -- Per-frame CFrame (replaces tween for physics stability)
+                    local dt = math.min(task.wait(), 0.05)
+                    local chunkMove = math.min(distToCenter, State.ChaseSpeed * dt)
                     local direction = (targetCenter - myPos).Unit
-                    local chunkTarget = myPos + direction * chunkMove
-                    local duration = chunkMove / State.ChaseSpeed
-
-                    local tween = TweenService:Create(
-                        hrp,
-                        TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
-                        {CFrame = CFrame.new(chunkTarget, chunkTarget + direction * 5)}
-                    )
-                    tween:Play()
-
-                    local done = false
-                    local conn
-                    conn = tween.Completed:Connect(function() done = true; conn:Disconnect() end)
-                    local timeout = tick() + duration + 1
-                    while not done and tick() < timeout do
-                        task.wait(0.01)
-                        if not State.TPChase or State.Target ~= plr or not State.Loaded then
-                            tween:Cancel()
-                            conn:Disconnect()
-                            hrp.Anchored = false
-                            if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
-                            return
-                        end
+                    local newPos = myPos + direction * chunkMove
+                    if newPos.Y < State.MinFlyHeight then
+                        newPos = Vector3.new(newPos.X, State.MinFlyHeight, newPos.Z)
                     end
-                    task.wait(State.ChunkWait)
+                    hrp.CFrame = CFrame.lookAt(newPos, Vector3.new(tPos.X, newPos.Y, tPos.Z))
                 end
             end
         end
@@ -486,7 +678,7 @@ local function autoM1()
     local hitList = {}
     local firstHead = nil
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LP then
+        if plr ~= LP and isAttackable(plr) then
             local tChar = plr.Character
             local tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
             local tHead = tChar and tChar:FindFirstChild("Head")
@@ -520,7 +712,6 @@ local function autoM1()
     local regAttack = net:FindFirstChild("RE/RegisterAttack")
     local regHit = net:FindFirstChild("RE/RegisterHit")
     if not (regAttack and regHit) then return end
-
     pcall(function()
         regAttack:FireServer(0.1)
         regHit:FireServer(firstHead, hitList)
@@ -537,9 +728,8 @@ local function rebuildTargetList()
         for uid, expiry in pairs(State.FarBlacklist) do
             if tick() >= expiry then State.FarBlacklist[uid] = nil end
         end
-
         for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LP and not State.FarBlacklist[plr.UserId] then
+            if plr ~= LP and not State.FarBlacklist[plr.UserId] and isAttackable(plr) then
                 local tChar = plr.Character
                 local tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
                 local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
@@ -617,277 +807,334 @@ end)
 -- UI
 -- ============================================
 local ui = Instance.new("ScreenGui")
-ui.Name = "ExtractV13"
+ui.Name = "ExtractUI"
 ui.ResetOnSpawn = false
 ui.Parent = LP:WaitForChild("PlayerGui")
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 320)
-frame.Position = UDim2.new(0, 20, 0.5, -160)
-frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-frame.BorderSizePixel = 0
-frame.Active = true
-frame.Draggable = true
-frame.Parent = ui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 520, 0, 340)
+main.Position = UDim2.new(0, 40, 0, 40)
+main.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+main.BackgroundTransparency = 0.1
+main.BorderSizePixel = 0
+main.Active = true
+main.Draggable = true
+main.Parent = ui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 28)
-title.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-title.BorderSizePixel = 0
-title.Text = "Extract v13"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 13
-title.Parent = frame
-Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+local stroke = Instance.new("UIStroke", main)
+stroke.Color = Color3.fromRGB(70, 70, 80)
+stroke.Thickness = 1
+stroke.Transparency = 0.5
 
--- Player info box
-local playerBox = Instance.new("Frame")
-playerBox.Size = UDim2.new(1, -20, 0, 72)
-playerBox.Position = UDim2.new(0, 10, 0, 35)
-playerBox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
-playerBox.BorderSizePixel = 0
-playerBox.Parent = frame
-Instance.new("UICorner", playerBox).CornerRadius = UDim.new(0, 6)
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 32)
+titleBar.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = main
+Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 8)
 
-local playerInfoText = Instance.new("TextLabel")
-playerInfoText.Size = UDim2.new(1, -10, 1, 0)
-playerInfoText.Position = UDim2.new(0, 5, 0, 0)
-playerInfoText.BackgroundTransparency = 1
-playerInfoText.Text = "loading..."
-playerInfoText.TextColor3 = Color3.fromRGB(220, 220, 240)
-playerInfoText.Font = Enum.Font.Gotham
-playerInfoText.TextSize = 11
-playerInfoText.TextXAlignment = Enum.TextXAlignment.Left
-playerInfoText.TextYAlignment = Enum.TextYAlignment.Top
-playerInfoText.Parent = playerBox
+local titleCover = Instance.new("Frame")
+titleCover.Size = UDim2.new(1, 0, 0, 8)
+titleCover.Position = UDim2.new(0, 0, 1, -8)
+titleCover.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+titleCover.BorderSizePixel = 0
+titleCover.Parent = titleBar
 
--- Target box
-local targetBox = Instance.new("Frame")
-targetBox.Size = UDim2.new(1, -20, 0, 50)
-targetBox.Position = UDim2.new(0, 10, 0, 112)
-targetBox.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
-targetBox.BorderSizePixel = 0
-targetBox.Parent = frame
-Instance.new("UICorner", targetBox).CornerRadius = UDim.new(0, 6)
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -60, 1, 0)
+titleText.Position = UDim2.new(0, 12, 0, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "Extract v19 — Auto Bounty"
+titleText.TextColor3 = Color3.fromRGB(240, 240, 255)
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 13
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = titleBar
 
-local targetName = Instance.new("TextLabel")
-targetName.Size = UDim2.new(1, -10, 0, 22)
-targetName.Position = UDim2.new(0, 5, 0, 4)
-targetName.BackgroundTransparency = 1
-targetName.Text = "Target: none"
-targetName.TextColor3 = Color3.fromRGB(255, 220, 120)
-targetName.Font = Enum.Font.GothamBold
-targetName.TextSize = 13
-targetName.TextXAlignment = Enum.TextXAlignment.Left
-targetName.Parent = targetBox
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.new(0, 24, 0, 24)
+minBtn.Position = UDim2.new(1, -56, 0, 4)
+minBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+minBtn.Text = "—"
+minBtn.TextColor3 = Color3.new(1, 1, 1)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 14
+minBtn.Parent = titleBar
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
 
-local targetId = Instance.new("TextLabel")
-targetId.Size = UDim2.new(1, -10, 0, 18)
-targetId.Position = UDim2.new(0, 5, 0, 26)
-targetId.BackgroundTransparency = 1
-targetId.Text = "ID: -   Dist: -"
-targetId.TextColor3 = Color3.fromRGB(180, 180, 200)
-targetId.Font = Enum.Font.Gotham
-targetId.TextSize = 11
-targetId.TextXAlignment = Enum.TextXAlignment.Left
-targetId.Parent = targetBox
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 24, 0, 24)
+closeBtn.Position = UDim2.new(1, -28, 0, 4)
+closeBtn.BackgroundColor3 = Color3.fromRGB(160, 50, 50)
+closeBtn.Text = "×"
+closeBtn.TextColor3 = Color3.new(1, 1, 1)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Parent = titleBar
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
 
-local function makeToggle(textOff, textOn, y, colorOff, colorOn, initialState, onChanged)
+local body = Instance.new("Frame")
+body.Size = UDim2.new(1, -20, 1, -124)
+body.Position = UDim2.new(0, 10, 0, 40)
+body.BackgroundTransparency = 1
+body.Parent = main
+
+local function makeBox(title, xScale, xOffset, wScale, wOffset)
+    local box = Instance.new("Frame")
+    box.Size = UDim2.new(wScale, wOffset, 1, 0)
+    box.Position = UDim2.new(xScale, xOffset, 0, 0)
+    box.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+    box.BackgroundTransparency = 0.3
+    box.BorderSizePixel = 0
+    box.Parent = body
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -16, 0, 20)
+    lbl.Position = UDim2.new(0, 8, 0, 8)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = title
+    lbl.TextColor3 = Color3.fromRGB(150, 150, 170)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = box
+    return box
+end
+
+local col1 = makeBox("PLAYER INFO", 0, 0, 0.33, -4)
+local col2 = makeBox("STATS", 0.33, 4, 0.33, -4)
+local col3 = makeBox("TARGET INFO", 0.66, 8, 0.34, -8)
+
+local function makeStatLine(parent, y, label, initVal)
+    local key = Instance.new("TextLabel")
+    key.Size = UDim2.new(0.45, -8, 0, 18)
+    key.Position = UDim2.new(0, 8, 0, y)
+    key.BackgroundTransparency = 1
+    key.Text = label
+    key.TextColor3 = Color3.fromRGB(170, 170, 190)
+    key.Font = Enum.Font.Gotham
+    key.TextSize = 12
+    key.TextXAlignment = Enum.TextXAlignment.Left
+    key.Parent = parent
+    local val = Instance.new("TextLabel")
+    val.Size = UDim2.new(0.55, -8, 0, 18)
+    val.Position = UDim2.new(0.45, 0, 0, y)
+    val.BackgroundTransparency = 1
+    val.Text = initVal
+    val.TextColor3 = Color3.fromRGB(255, 255, 255)
+    val.Font = Enum.Font.GothamBold
+    val.TextSize = 12
+    val.TextXAlignment = Enum.TextXAlignment.Right
+    val.Parent = parent
+    return val
+end
+
+local lblBounty = makeStatLine(col1, 36, "Bounty:", "...")
+local lblBeli   = makeStatLine(col1, 62, "Beli:", "...")
+local lblLevel  = makeStatLine(col1, 88, "Level:", "...")
+local lblHealth = makeStatLine(col1, 114, "Health:", "...")
+
+local lblEarned = makeStatLine(col2, 36, "Earned:", "0")
+local lblTime   = makeStatLine(col2, 62, "Time:", "00:00:00")
+local lblKills  = makeStatLine(col2, 88, "Kills:", "0")
+local lblPing   = makeStatLine(col2, 114, "Ping/FPS:", "-")
+local lblCombo  = makeStatLine(col2, 140, "Combo:", "-")
+
+local lblTName  = makeStatLine(col3, 36, "Name:", "-")
+local lblTLevel = makeStatLine(col3, 62, "Level:", "-")
+local lblTDist  = makeStatLine(col3, 88, "Dist:", "-")
+local lblTHP    = makeStatLine(col3, 114, "HP:", "-")
+local lblTState = makeStatLine(col3, 140, "State:", "-")
+
+local footer = Instance.new("Frame")
+footer.Size = UDim2.new(1, -20, 0, 76)
+footer.Position = UDim2.new(0, 10, 1, -84)
+footer.BackgroundTransparency = 1
+footer.Parent = main
+
+local row1 = Instance.new("Frame")
+row1.Size = UDim2.new(1, 0, 0, 36)
+row1.Position = UDim2.new(0, 0, 0, 0)
+row1.BackgroundTransparency = 1
+row1.Parent = footer
+
+local row2 = Instance.new("Frame")
+row2.Size = UDim2.new(1, 0, 0, 36)
+row2.Position = UDim2.new(0, 0, 0, 40)
+row2.BackgroundTransparency = 1
+row2.Parent = footer
+
+local function makeButton(parent, text, xOffset, colorOff, colorOn, initialState, onClick)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -20, 0, 28)
-    btn.Position = UDim2.new(0, 10, 0, y)
+    btn.Size = UDim2.new(0.25, -4, 1, 0)
+    btn.Position = UDim2.new(xOffset, 2, 0, 0)
     btn.BackgroundColor3 = colorOff
     btn.BorderSizePixel = 0
-    btn.Text = textOff
+    btn.Text = text
     btn.TextColor3 = Color3.new(1, 1, 1)
     btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 12
-    btn.Parent = frame
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
-    local state = initialState
-    local function render()
-        btn.Text = state and textOn or textOff
-        btn.BackgroundColor3 = state and colorOn or colorOff
-    end
-    render()
-    btn.MouseButton1Click:Connect(function()
-        state = not state
+    btn.TextSize = 11
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    if initialState ~= nil then
+        local state = initialState
+        local function render()
+            btn.Text = state and (text .. ":ON") or (text .. ":OFF")
+            btn.BackgroundColor3 = state and colorOn or colorOff
+        end
         render()
-        if onChanged then pcall(onChanged, state) end
-    end)
+        btn.MouseButton1Click:Connect(function()
+            state = not state
+            render()
+            if onClick then onClick(state) end
+        end)
+    else
+        btn.MouseButton1Click:Connect(function() if onClick then onClick() end end)
+    end
     return btn
 end
 
-makeToggle(
-    "TP Chase: OFF", "TP Chase: ON",
-    170, Color3.fromRGB(80, 80, 80), Color3.fromRGB(70, 140, 220), false,
+local btnAim = makeButton(row1, "Aim", 0.00,
+    Color3.fromRGB(60, 60, 70), Color3.fromRGB(220, 180, 60), false,
+    function(v) State.CameraLock = v end)
+
+local btnCombo = makeButton(row1, "Combo", 0.25,
+    Color3.fromRGB(60, 60, 70), Color3.fromRGB(200, 60, 200), false,
+    function(v)
+        State.AutoCombo = v
+        if v and not State.CameraLock then
+            State.CameraLock = true
+            btnAim.Text = "Aim:ON"
+            btnAim.BackgroundColor3 = Color3.fromRGB(220, 180, 60)
+        end
+    end)
+
+local btnTP = makeButton(row1, "TP", 0.50,
+    Color3.fromRGB(60, 60, 70), Color3.fromRGB(70, 140, 220), false,
     function(v)
         State.TPChase = v
         if not v then
             local hum = getHum()
             if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
         end
-    end
-)
+    end)
 
-local nextBtn = Instance.new("TextButton")
-nextBtn.Size = UDim2.new(1, -20, 0, 28)
-nextBtn.Position = UDim2.new(0, 10, 0, 205)
-nextBtn.BackgroundColor3 = Color3.fromRGB(180, 130, 60)
-nextBtn.BorderSizePixel = 0
-nextBtn.Text = "Next Target"
-nextBtn.TextColor3 = Color3.new(1, 1, 1)
-nextBtn.Font = Enum.Font.GothamBold
-nextBtn.TextSize = 12
-nextBtn.Parent = frame
-Instance.new("UICorner", nextBtn).CornerRadius = UDim.new(0, 5)
-nextBtn.MouseButton1Click:Connect(function() cycleTarget() end)
+local btnM1 = makeButton(row1, "M1", 0.75,
+    Color3.fromRGB(60, 60, 70), Color3.fromRGB(220, 80, 80), false,
+    function(v) State.AutoM1 = v end)
 
-makeToggle(
-    "Auto M1: OFF", "Auto M1: ON",
-    240, Color3.fromRGB(80, 80, 80), Color3.fromRGB(220, 80, 80), false,
-    function(v) State.AutoM1 = v end
-)
+local btnFilter = makeButton(row2, "Safe", 0.00,
+    Color3.fromRGB(60, 60, 70), Color3.fromRGB(80, 200, 120), true,
+    function(v) State.RequireOutsideSafeZone = v; State.RequirePvpOn = v; rebuildTargetList() end)
 
--- Unload
-local unloadBtn = Instance.new("TextButton")
-unloadBtn.Size = UDim2.new(1, -20, 0, 24)
-unloadBtn.Position = UDim2.new(0, 10, 0, 280)
-unloadBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
-unloadBtn.BorderSizePixel = 0
-unloadBtn.Text = "Unload"
-unloadBtn.TextColor3 = Color3.new(1, 1, 1)
-unloadBtn.Font = Enum.Font.GothamBold
-unloadBtn.TextSize = 11
-unloadBtn.Parent = frame
-Instance.new("UICorner", unloadBtn).CornerRadius = UDim.new(0, 5)
+local btnLevel = makeButton(row2, "Lvl", 0.25,
+    Color3.fromRGB(60, 60, 70), Color3.fromRGB(180, 140, 240), true,
+    function(v) State.RequireLevelRange = v; rebuildTargetList() end)
+
+local btnSkip = makeButton(row2, "Skip", 0.50,
+    Color3.fromRGB(60, 60, 70), nil, nil,
+    function()
+        cycleTarget()
+        btnSkip.Text = "Skipped!"
+        task.wait(0.5)
+        btnSkip.Text = "Skip"
+    end)
+
+local btnUnload = makeButton(row2, "Exit", 0.75,
+    Color3.fromRGB(160, 50, 50), nil, nil,
+    function()
+        State.TPChase = false
+        State.AutoM1 = false
+        State.AutoCombo = false
+        State.CameraLock = false
+        State.Loaded = false
+        local hrp = getHRP()
+        if hrp then hrp.Anchored = false end
+        if heartbeatConn then heartbeatConn:Disconnect() end
+        pcall(function() RunService:UnbindFromRenderStep("ExtractAimLock") end)
+        ui:Destroy()
+        getgenv().ExtractV6_Lock = false
+        print("[Extract v19] Unloaded.")
+    end)
+
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    body.Visible = not minimized
+    footer.Visible = not minimized
+    main.Size = minimized and UDim2.new(0, 520, 0, 32) or UDim2.new(0, 520, 0, 340)
+end)
+closeBtn.MouseButton1Click:Connect(function() btnUnload.MouseButton1Click:Fire() end)
 
 -- ============================================
--- STATUS PANEL (top-right)
+-- UI UPDATER
 -- ============================================
-local statusGui = Instance.new("ScreenGui")
-statusGui.Name = "ExtractStatus"
-statusGui.ResetOnSpawn = false
-statusGui.Parent = LP:WaitForChild("PlayerGui")
-
-local statusFrame = Instance.new("Frame")
-statusFrame.Size = UDim2.new(0, 180, 0, 94)
-statusFrame.Position = UDim2.new(1, -190, 0, 10)
-statusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-statusFrame.BackgroundTransparency = 0.2
-statusFrame.BorderSizePixel = 0
-statusFrame.Parent = statusGui
-Instance.new("UICorner", statusFrame).CornerRadius = UDim.new(0, 6)
-
-local statusTitle = Instance.new("TextLabel")
-statusTitle.Size = UDim2.new(1, -10, 0, 18)
-statusTitle.Position = UDim2.new(0, 8, 0, 4)
-statusTitle.BackgroundTransparency = 1
-statusTitle.Text = "Auto Working"
-statusTitle.TextColor3 = Color3.fromRGB(160, 160, 180)
-statusTitle.Font = Enum.Font.GothamBold
-statusTitle.TextSize = 11
-statusTitle.TextXAlignment = Enum.TextXAlignment.Left
-statusTitle.Parent = statusFrame
-
-local function makeStatusLine(y)
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -10, 0, 16)
-    lbl.Position = UDim2.new(0, 8, 0, y)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = "…"
-    lbl.TextColor3 = Color3.fromRGB(180, 180, 180)
-    lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 11
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = statusFrame
-    return lbl
-end
-
-local nofogLine = makeStatusLine(24)
-local fpsLine   = makeStatusLine(42)
-local hakiLine  = makeStatusLine(60)
-
-unloadBtn.MouseButton1Click:Connect(function()
-    State.TPChase = false
-    State.AutoM1 = false
-    State.Loaded = false
-    local hrp = getHRP()
-    if hrp then hrp.Anchored = false end
-    if heartbeatConn then heartbeatConn:Disconnect() end
-    if ui then ui:Destroy() end
-    if statusGui then statusGui:Destroy() end
-    getgenv().ExtractV6_Lock = false
-    print("[Extract v13] Unloaded.")
-end)
-
--- Status updater
-task.spawn(function()
-    while State.Loaded do
-        task.wait(1)
-        if not statusFrame.Parent then break end
-
-        if Runtime.NoFogApplied then
-            nofogLine.Text = "✓ NoFog working"
-            nofogLine.TextColor3 = Color3.fromRGB(100, 220, 140)
-        else
-            nofogLine.Text = "… NoFog pending"
-            nofogLine.TextColor3 = Color3.fromRGB(220, 180, 80)
-        end
-
-        if Runtime.FPSApplied then
-            fpsLine.Text = "✓ FPS Boost working"
-            fpsLine.TextColor3 = Color3.fromRGB(100, 220, 140)
-        else
-            fpsLine.Text = "… FPS Boost pending"
-            fpsLine.TextColor3 = Color3.fromRGB(220, 180, 80)
-        end
-
-        hakiLine.Text = "✓ Ken/Buso/V3/V4 running"
-        hakiLine.TextColor3 = Color3.fromRGB(100, 220, 140)
-    end
-end)
-
--- Player info updater
 task.spawn(function()
     while State.Loaded do
         task.wait(0.2)
-        if not playerInfoText.Parent then break end
-        local bounty = getBounty(LP)
-        local level = getLevel(LP)
+        if not main.Parent then break end
+        local bounty = getBounty(LP) or 0
+        lblBounty.Text = commaFormat(bounty)
+        lblBeli.Text = commaFormat(getBeli(LP))
+        local myLvl = getLevel(LP)
+        lblLevel.Text = myLvl and tostring(myLvl) or "?"
+        local hum = getHum()
+        if hum then
+            lblHealth.Text = string.format("%s/%s", commaFormat(hum.Health), commaFormat(hum.MaxHealth))
+        else
+            lblHealth.Text = "Dead"
+        end
+        if Stats.LastBounty == 0 then Stats.LastBounty = bounty end
+        if bounty > Stats.LastBounty then
+            Stats.BountyEarned = Stats.BountyEarned + (bounty - Stats.LastBounty)
+        end
+        Stats.LastBounty = bounty
+        lblEarned.Text = commaFormat(Stats.BountyEarned)
+        lblKills.Text = tostring(Stats.TotalKills)
+        local elapsed = os.time() - Stats.StartTime
+        lblTime.Text = string.format("%02d:%02d:%02d", math.floor(elapsed/3600), math.floor((elapsed%3600)/60), elapsed%60)
         local ping = math.floor((LP:GetNetworkPing() or 0) * 1000 + 0.5)
-        playerInfoText.Text = string.format(
-            "%s [%d]\nTeam: %s   Lv: %s\nBounty: %s   Ping: %dms   FPS: %d",
-            LP.Name,
-            LP.UserId,
-            getTeamName(),
-            level and tostring(level) or "?",
-            fmtNum(bounty),
-            ping,
-            fpsValue
-        )
-    end
-end)
+        lblPing.Text = string.format("%dms / %d", ping, fpsValue)
+        lblCombo.Text = State.CurrentComboWeapon or "-"
 
--- Target info updater
-task.spawn(function()
-    while State.Loaded do
-        task.wait(0.2)
-        if not targetBox.Parent then break end
         local t = State.Target
         if t and t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
             local hrp = getHRP()
             local tHRP = t.Character:FindFirstChild("HumanoidRootPart")
             local d = (hrp and tHRP) and math.floor((tHRP.Position - hrp.Position).Magnitude) or 0
-            targetName.Text = "Target: " .. t.Name
-            targetId.Text = string.format("ID: %d   Dist: %dm", t.UserId, d)
+            local tHum = t.Character:FindFirstChildOfClass("Humanoid")
+            lblTName.Text = t.Name
+            lblTDist.Text = d .. "m"
+            if tHum then
+                lblTHP.Text = string.format("%s/%s", commaFormat(tHum.Health), commaFormat(tHum.MaxHealth))
+            else
+                lblTHP.Text = "-"
+            end
+            local tLvl = getLevel(t)
+            if tLvl then
+                local ok = isLevelEligible(t)
+                lblTLevel.Text = string.format("%d %s", tLvl, ok and "OK" or "NG")
+                lblTLevel.TextColor3 = ok and Color3.fromRGB(120, 220, 120) or Color3.fromRGB(255, 120, 120)
+            else
+                lblTLevel.Text = "?"
+                lblTLevel.TextColor3 = Color3.fromRGB(180, 180, 180)
+            end
+            local tags = {}
+            if isInSafeZone(t) then table.insert(tags, "SAFE") end
+            if isPvpOff(t) then table.insert(tags, "PVP OFF") end
+            if #tags > 0 then
+                lblTState.Text = table.concat(tags, "/")
+                lblTState.TextColor3 = Color3.fromRGB(255, 120, 120)
+            else
+                lblTState.Text = "OK"
+                lblTState.TextColor3 = Color3.fromRGB(120, 220, 120)
+            end
         else
-            targetName.Text = "Target: none"
-            targetId.Text = "ID: -   Dist: -"
+            lblTName.Text = "-"; lblTLevel.Text = "-"; lblTLevel.TextColor3 = Color3.fromRGB(255,255,255)
+            lblTDist.Text = "-"; lblTHP.Text = "-"; lblTState.Text = "-"; lblTState.TextColor3 = Color3.fromRGB(255,255,255)
         end
     end
 end)
 
-print("[Extract v13] Loaded. Haki/Race always-on.")
+print("[Extract v19] Loaded. Aim snap + altitude floor + 1.25x range.")
